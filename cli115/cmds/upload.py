@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
 import time
-
 from tqdm import tqdm
 
 from cli115.client.models import Progress
@@ -40,6 +40,26 @@ class UploadCommand(PairFormatterMixin, WorkerCommand, BaseCommand):
                 "(e.g. '100MB', '1GB').  Raises an error if the server does not "
                 "have a matching copy.  Values below 2 MB are ignored."
             ),
+        )
+        parser.add_argument(
+            "--part-size",
+            type=parse_size,
+            default=None,
+            metavar="SIZE",
+            help=(
+                "Part size for multipart uploads (e.g. '16MB', '32MB', '64MB'). "
+                "Defaults to config value or 16 MB."
+            ),
+        )
+        parser.add_argument(
+            "-j",
+            "--threads",
+            "--max-workers",
+            dest="max_workers",
+            type=int,
+            default=None,
+            metavar="N",
+            help="Number of concurrent file uploads for directories (default: 1)",
         )
         parser.add_argument(
             "--include",
@@ -86,7 +106,24 @@ class UploadCommand(PairFormatterMixin, WorkerCommand, BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
-        self.uploader = Uploader(self._create_client(), dry_run=args.dry_run)
+        part_size = args.part_size
+        if part_size is None and self.cfg and "upload" in self.cfg:
+            part_size_str = self.cfg.get("upload", "part_size", fallback=None)
+            if part_size_str:
+                part_size = parse_size(part_size_str)
+
+        max_workers = args.max_workers
+        if max_workers is None and self.cfg and "upload" in self.cfg:
+            max_workers = self.cfg.getint("upload", "max_workers", fallback=1)
+        if max_workers is None or max_workers < 1:
+            max_workers = 1
+
+        self.uploader = Uploader(
+            self._create_client(),
+            dry_run=args.dry_run,
+            part_size=part_size,
+            max_workers=max_workers,
+        )
 
         with UploadProgress(
             self.uploader,
@@ -134,6 +171,7 @@ class UploadProgress:
         self.uploader = uploader
         self.show_plan = show_plan
         self.show_progress = show_progress
+        self._lock = threading.Lock()
 
         self.current_text: tqdm | None = None
         self.current_bar: tqdm | None = None
@@ -153,23 +191,23 @@ class UploadProgress:
     @property
     def current_entry(self) -> UploadEntry | None:
         return self._current_entry
-
     @current_entry.setter
     def current_entry(self, entry: UploadEntry) -> None:
         if not (self._current_entry is entry):
             self._current_entry = entry
 
-            self.current_bar.reset(max(entry.size, 1))
+            if self.current_bar is not None:
+                self.current_bar.reset(max(entry.size, 1))
 
-            self.overall_text.set_description_str(
-                "{0} ({1}/{2})".format(
-                    entry.local_path,
-                    self.completed_files,
-                    self.total_files,
-                ),
-                refresh=True,
-            )
-
+            if self.overall_text is not None:
+                self.overall_text.set_description_str(
+                    "{0} ({1}/{2})".format(
+                        entry.local_path,
+                        self.completed_files,
+                        self.total_files,
+                    ),
+                    refresh=True,
+                )
     def init(self):
         self.uploader.on_entry_added.connect(self.on_added)
         self.started_at = time.monotonic()
@@ -179,10 +217,11 @@ class UploadProgress:
         if self.overall_bar:
             self.overall_text.close()
             self.overall_bar.close()
-            self.current_text.close()
-            self.current_bar.close()
+            if self.current_text is not None:
+                self.current_text.close()
+            if self.current_bar is not None:
+                self.current_bar.close()
             print()  # ensure progress bars are cleared before final output
-
     def report(self):
         if self.started_at is None or self.ended_at is None:
             return
@@ -225,21 +264,43 @@ class UploadProgress:
 
     def connect_message_listener(self, entry: UploadEntry):
         def listener(sender, message) -> None:
-            self.current_entry = entry
-            self.current_text.set_description_str(message, refresh=True)
+            with self._lock:
+                if self.uploader.max_workers == 1:
+                    self.current_entry = entry
+                    if self.current_text is not None:
+                        self.current_text.set_description_str(message, refresh=True)
+                else:
+                    if self.overall_text is not None:
+                        self.overall_text.set_description_str(
+                            "uploading ({0}/{1}) - {2}: {3}".format(
+                                self.completed_files,
+                                self.total_files,
+                                os.path.basename(os.fspath(entry.local_path)),
+                                message,
+                            ),
+                            refresh=True,
+                        )
 
         entry.status.on_message.connect(listener, weak=False)
 
     def connect_upload_listener(self, entry: UploadEntry):
         def listener(sender, progress: Progress) -> None:
-            self.current_bar.reset(max(entry.size, 1))
+            with self._lock:
+                if self.uploader.max_workers == 1:
+                    self.current_entry = entry
+                    if self.current_bar is not None:
+                        self.current_bar.reset(max(entry.size, 1))
 
             def on_progress(sender, delta: int, new: int, old: int, completed: bool):
-                self.current_bar.n = new
-                self.current_bar.refresh()
-                if not completed:
-                    self.overall_bar.n = self.completed_bytes + new
-                    self.overall_bar.refresh()
+                with self._lock:
+                    if self.uploader.max_workers == 1 and self.current_bar is not None:
+                        self.current_bar.n = new
+                        self.current_bar.refresh()
+                    if delta > 0:
+                        self.completed_bytes += delta
+                        if self.overall_bar is not None:
+                            self.overall_bar.n = min(self.completed_bytes, self.total_size)
+                            self.overall_bar.refresh()
 
             progress.on_change.connect(on_progress, weak=False)
 
@@ -247,18 +308,26 @@ class UploadProgress:
 
     def connect_complete_listener(self, entry: UploadEntry):
         def listener(sender) -> None:
-            self.current_entry = entry
+            with self._lock:
+                self.completed_files += 1
+                if entry.status.is_instant_uploaded:
+                    self.instant_count += 1
+                    self.completed_bytes += entry.size
+                    if self.overall_bar is not None:
+                        self.overall_bar.n = min(self.completed_bytes, self.total_size)
+                        self.overall_bar.refresh()
 
-            self.completed_files += 1
-            if entry.status.is_instant_uploaded:
-                self.instant_count += 1
-
-            self.completed_bytes += entry.size
-            self.overall_bar.n = self.completed_bytes
-            self.overall_bar.refresh()
+                if self.uploader.max_workers == 1:
+                    self.current_entry = entry
+                if self.overall_text is not None:
+                    self.overall_text.set_description_str(
+                        "uploading... ({0}/{1})".format(
+                            self.completed_files, self.total_files
+                        ),
+                        refresh=True,
+                    )
 
         entry.status.on_complete.connect(listener, weak=False)
-
     def create_progress_bars(self):
         self.overall_text = tqdm(
             total=0,
@@ -278,24 +347,24 @@ class UploadProgress:
             leave=False,
             bar_format=("{percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}]"),
         )
-        self.current_text = tqdm(
-            total=0, position=2, dynamic_ncols=True, leave=False, bar_format="{desc}"
-        )
-        self.current_bar = tqdm(
-            total=1,
-            position=3,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            dynamic_ncols=True,
-            leave=False,
-            bar_format=(
-                "{percentage:3.0f}%|{bar}| "
-                "{n_fmt}/{total_fmt} "
-                "[{elapsed}<{remaining}, {rate_fmt}]"
-            ),
-        )
-
+        if self.uploader.max_workers == 1:
+            self.current_text = tqdm(
+                total=0, position=2, dynamic_ncols=True, leave=False, bar_format="{desc}"
+            )
+            self.current_bar = tqdm(
+                total=1,
+                position=3,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                dynamic_ncols=True,
+                leave=False,
+                bar_format=(
+                    "{percentage:3.0f}%|{bar}| "
+                    "{n_fmt}/{total_fmt} "
+                    "[{elapsed}<{remaining}, {rate_fmt}]"
+                ),
+            )
     def __enter__(self):
         self.init()
         return self

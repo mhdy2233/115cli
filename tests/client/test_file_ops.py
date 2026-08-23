@@ -67,6 +67,24 @@ class TestCreateDirectory:
         result = client.file.create_directory("/parent/existing", parents=True)
         assert result is existing
 
+    def test_create_existing_file_with_parents_raises(self):
+        # When parents=True and the target path exists as a file, it should raise FileExistsError.
+        client = make_client()
+        existing_file = make_file(name="existing", id="999", path="/parent/existing")
+
+        def mock_request(url, **kwargs):
+            resp = MagicMock()
+            if url.endswith("/files/getid"):
+                resp.json.return_value = {"id": "123"}
+            if url.endswith("/files/add"):
+                raise FileExistsError("directory already exists")
+            return resp
+
+        client.file._api.get.side_effect = mock_request
+        client.file._api.post.side_effect = mock_request
+        client.file.stat = MagicMock(return_value=existing_file)
+        with pytest.raises(FileExistsError, match="cannot create directory at file path"):
+            client.file.create_directory("/parent/existing", parents=True)
 
 class TestDelete:
 

@@ -56,6 +56,17 @@ class TestUploadFile:
         call_args = client.file.upload.call_args
         assert call_args.kwargs["instant_only"] == threshold
 
+    def test_upload_file_part_size_passed_through(self):
+        client = _make_client()
+        client.file.stat.side_effect = FileNotFoundError("not found")
+        part_size = 32 * 1024 * 1024  # 32 MB
+
+        uploader = Uploader(client, part_size=part_size)
+        uploader.upload("/local/file.txt", "/remote/file.txt")
+
+        assert client.file.upload.call_count == 1
+        call_args = client.file.upload.call_args
+        assert call_args.kwargs["part_size"] == part_size
 
 class TestUploadDirectory:
     def test_upload_dir_to_nonexistent_remote_creates_it(self, tmp_path):
@@ -86,8 +97,28 @@ class TestUploadDirectory:
 
         assert isinstance(uploader, Uploader)
         expected_dest = "/remote/existing/" + tmp_path.name
-        client.file.create_directory.assert_any_call(expected_dest, parents=False)
+        client.file.create_directory.assert_any_call(expected_dest, parents=True)
 
+    def test_upload_dir_to_existing_remote_subdir_merges(self, tmp_path):
+        (tmp_path / "file.txt").write_text("content")
+
+        client = _make_client()
+        client.file.stat.return_value = make_dir(name="existing")
+        existing_dest_dir = make_dir(name=tmp_path.name)
+        client.file.create_directory.return_value = existing_dest_dir
+
+        uploader = Uploader(client)
+        result = uploader.upload(str(tmp_path), "/remote/existing")
+
+        expected_dest = "/remote/existing/" + tmp_path.name
+        client.file.create_directory.assert_any_call(expected_dest, parents=True)
+        assert result is existing_dest_dir
+        client.file.upload.assert_called_once_with(
+            f"{expected_dest}/file.txt",
+            str(tmp_path / "file.txt"),
+            instant_only=None,
+            status=uploader.entries[0].status,
+        )
     def test_upload_dir_to_remote_file_raises(self, tmp_path):
         (tmp_path / "file.txt").write_text("content")
 
@@ -306,7 +337,7 @@ class TestNoTargetDirectory:
         uploader = Uploader(client)
         uploader.upload(str(tmp_path), "/remote/existing", no_target_dir=True)
 
-        client.file.create_directory.assert_any_call("/remote/existing", parents=False)
+        client.file.create_directory.assert_any_call("/remote/existing", parents=True)
         assert client.file.upload.call_args.args[0] == "/remote/existing/file.txt"
 
 
@@ -334,3 +365,21 @@ class TestDryRun:
         client.file.upload.assert_not_called()
         client.file.create_directory.assert_not_called()
         assert len(uploader.entries) == 2
+
+class TestUploadConcurrencyAndPartSize:
+    def test_upload_dir_part_size_and_concurrency(self, tmp_path):
+        (tmp_path / "a.txt").write_text("a")
+        (tmp_path / "b.txt").write_text("b")
+        (tmp_path / "c.txt").write_text("c")
+
+        client = _make_client()
+        client.file.stat.side_effect = FileNotFoundError("not found")
+        client.file.create_directory.return_value = make_dir()
+        part_size = 64 * 1024 * 1024  # 64 MB
+
+        uploader = Uploader(client, part_size=part_size, max_workers=3)
+        uploader.upload(str(tmp_path), "/remote/dest")
+
+        assert client.file.upload.call_count == 3
+        for call in client.file.upload.call_args_list:
+            assert call.kwargs["part_size"] == part_size

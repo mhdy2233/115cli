@@ -85,6 +85,12 @@ def load_config() -> ConfigParser:
         config["download"]["max_connection"] = "2"
     if "check_integrity" not in config["download"]:
         config["download"]["check_integrity"] = "false"
+    if "upload" not in config:
+        config["upload"] = {}
+    if "part_size" not in config["upload"]:
+        config["upload"]["part_size"] = "16M"
+    if "max_workers" not in config["upload"]:
+        config["upload"]["max_workers"] = "1"
     return config
 
 

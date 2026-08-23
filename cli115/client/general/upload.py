@@ -23,9 +23,9 @@ from .base import (
     Endpoint,
 )
 
-# 16 MB per chunk; also used as the threshold for switching to multipart upload
-MULTIPART_UPLOAD_PART_SIZE = 16 * 1024 * 1024
-
+# 16 MB default per chunk; also used as default threshold for switching to multipart upload
+DEFAULT_PART_SIZE = 16 * 1024 * 1024
+MULTIPART_UPLOAD_PART_SIZE = DEFAULT_PART_SIZE
 _CHUNK_SIZE = 64 * 1024
 
 
@@ -150,7 +150,13 @@ class UploadClient:
         return data
 
     def multipart_upload(
-        self, file: BinaryIO, *, bucket: str, object: str, callback: str
+        self,
+        file: BinaryIO,
+        *,
+        bucket: str,
+        object: str,
+        callback: str,
+        part_size: int = DEFAULT_PART_SIZE,
     ) -> dict:
         """Upload a file using the OSS multipart protocol.
 
@@ -159,6 +165,7 @@ class UploadClient:
             bucket: OSS bucket name.
             object: OSS object key.
             callback: Serialised callback payload from the initupload response.
+            part_size: Size in bytes of each uploaded part (defaults to 16 MB).
 
         Returns:
             Parsed JSON response from the OSS complete-upload callback.
@@ -176,21 +183,21 @@ class UploadClient:
                 if not peek:
                     break
 
-                # part_size is a one-element list so the generator below can
+                # part_size_acc is a one-element list so the generator below can
                 # accumulate the total and the caller can read it afterwards.
-                part_size = [0]
+                part_size_acc = [0]
                 md5 = hashlib.md5()
 
                 def _iter_part_content(first_chunk=peek):
-                    remaining = MULTIPART_UPLOAD_PART_SIZE - len(first_chunk)
-                    part_size[0] += len(first_chunk)
+                    remaining = part_size - len(first_chunk)
+                    part_size_acc[0] += len(first_chunk)
                     md5.update(first_chunk)
                     yield first_chunk
                     while remaining > 0:
                         buf = file.read(min(_CHUNK_SIZE, remaining))
                         if not buf:
                             break
-                        part_size[0] += len(buf)
+                        part_size_acc[0] += len(buf)
                         md5.update(buf)
                         remaining -= len(buf)
                         yield buf
@@ -198,8 +205,7 @@ class UploadClient:
                 part = self._oss_upload_part(
                     url, upload_id, part_number, _iter_part_content(), token, pool
                 )
-                part["Size"] = part_size[0]
-
+                part["Size"] = part_size_acc[0]
                 local_md5 = base64.b64encode(md5.digest()).decode()
                 server_md5 = part.pop("ContentMD5", "")
                 if server_md5 and server_md5 != local_md5:

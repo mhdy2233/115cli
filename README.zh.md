@@ -68,6 +68,8 @@ pip install 115cli
 115cli upload /local/folder/ /remote/dir/
 # 文件黑白名单
 115cli upload /local/folder/ /remote/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
+# 多文件并发上传与自定义分片大小
+115cli upload /local/folder/ /remote/dir/ -j 4 --part-size 32M
 
 # 离线下载
 115cli download quota

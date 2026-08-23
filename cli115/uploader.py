@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from os import PathLike
-from typing import Sequence
 
 from blinker import Signal
 from pathspec import PathSpec
@@ -39,9 +39,18 @@ class Uploader:
             Receivers get ``(sender, entries=<list of new entries>)``.
     """
 
-    def __init__(self, client: Client, *, dry_run: bool = False):
+    def __init__(
+        self,
+        client: Client,
+        *,
+        dry_run: bool = False,
+        part_size: int | None = None,
+        max_workers: int = 1,
+    ):
         self._client = client
         self.dry_run = dry_run
+        self.part_size = part_size
+        self.max_workers = max_workers if max_workers and max_workers > 0 else 1
         self.entries: list[UploadEntry] = []
         self.on_entry_added = Signal()
 
@@ -51,10 +60,12 @@ class Uploader:
         remote_path: str,
         *,
         instant_only: int | None = None,
+        part_size: int | None = None,
+        max_workers: int | None = None,
         include: Sequence[str] | None = None,
         exclude: Sequence[str] | None = None,
         no_target_dir: bool = False,
-    ) -> None:
+    ) -> Directory | File | None:
         """Upload a local file or directory to the remote filesystem.
 
         If ``local_path`` is a directory, the directory tree is uploaded
@@ -81,12 +92,17 @@ class Uploader:
                 ignored.  Raises
                 :class:`~cli115.exceptions.InstantUploadNotAvailableError` when
                 instant upload is unavailable for a qualifying file.
+            part_size: Part size in bytes for multipart uploads. Defaults to
+                the uploader's ``part_size`` or 16 MB.
+            max_workers: Number of concurrent file uploads when uploading a
+                directory. Defaults to the uploader's ``max_workers`` (1).
             include: Glob patterns for files to include.  Only files matching at
                 least one pattern are uploaded.  ``None`` means include all files.
             exclude: Glob patterns for files to exclude.  Files matching any
                 pattern are skipped.  ``None`` means exclude nothing.
+
         Returns:
-            The created remote directory entry when uploading a directory, or the
+            The created or existing remote directory entry when uploading a directory, or the
             result returned by ``client.file.upload`` when uploading a file. `None`
             is returned when ``dry_run`` is ``True``.
 
@@ -96,11 +112,20 @@ class Uploader:
         """
 
         local_path = os.path.abspath(local_path)
+        effective_part_size = part_size if part_size is not None else self.part_size
+        effective_max_workers = (
+            max_workers if max_workers is not None else self.max_workers
+        )
+        if effective_max_workers < 1:
+            effective_max_workers = 1
+
         if os.path.isdir(local_path):
             return self._upload_directory(
                 local_path,
                 remote_path,
                 instant_only=instant_only,
+                part_size=effective_part_size,
+                max_workers=effective_max_workers,
                 include=include,
                 exclude=exclude,
                 no_target_dir=no_target_dir,
@@ -110,6 +135,7 @@ class Uploader:
                 local_path,
                 remote_path,
                 instant_only=instant_only,
+                part_size=effective_part_size,
             )
 
     def _upload_file(
@@ -118,6 +144,7 @@ class Uploader:
         remote_path: str,
         *,
         instant_only: int | None,
+        part_size: int | None = None,
     ) -> File | None:
         # If remote path points to an existing directory, append filename
         try:
@@ -137,6 +164,7 @@ class Uploader:
                 remote_path,
                 local_path,
                 instant_only=instant_only,
+                part_size=part_size,
                 status=upload_entry.status,
             )
 
@@ -147,10 +175,11 @@ class Uploader:
         *,
         no_target_dir: bool = False,
         instant_only: int | None = None,
+        part_size: int | None = None,
+        max_workers: int = 1,
         include: Sequence[str] | None = None,
         exclude: Sequence[str] | None = None,
     ) -> Directory | None:
-        entry = None
         try:
             entry = self._client.file.stat(dest_path)
             if not entry.is_directory:
@@ -184,23 +213,31 @@ class Uploader:
             return
 
         # Create destination directory
-        dest_dir = self._client.file.create_directory(dest_path, parents=entry is None)
+        dest_dir = self._client.file.create_directory(dest_path, parents=True)
 
         # Create intermediate directories
         for d in sorted(dirs):
             self._client.file.create_directory(d, parents=True)
 
         # Upload files
-        for upload_entry in entries:
+        def _upload_single_entry(upload_entry: UploadEntry) -> None:
             try:
                 self._client.file.upload(
                     upload_entry.remote_path,
                     upload_entry.local_path,
                     instant_only=instant_only,
+                    part_size=part_size,
                     status=upload_entry.status,
                 )
             except Exception as exc:
                 upload_entry.error = exc
+
+        if max_workers > 1 and len(entries) > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                list(executor.map(_upload_single_entry, entries))
+        else:
+            for upload_entry in entries:
+                _upload_single_entry(upload_entry)
 
         return dest_dir
 

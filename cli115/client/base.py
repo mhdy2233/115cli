@@ -32,6 +32,7 @@ from cli115.client.lazy import LazyPathCollection, LazyCollection
 DEFAULT_PAGE_SIZE = 200  # Default number of items to return in list operations
 MAX_PAGE_SIZE = 1150  # 1150 is the maximum page size allowed by the API
 MIN_INSTANT_UPLOAD_SIZE = 2 * 1024 * 1024  # Minimum file size for instant upload
+DEFAULT_PART_SIZE = 16 * 1024 * 1024  # Default part size for multipart upload
 
 
 class Client(ABC):
@@ -494,6 +495,7 @@ class FileClient(ABC):
         file: str | PathLike[str] | BinaryIO,
         *,
         instant_only: int | None = None,
+        part_size: int | None = None,
         status: UploadStatus | None = None,
     ) -> File:
         """Upload a file.
@@ -514,6 +516,8 @@ class FileClient(ABC):
                   :class:`~cli115.exceptions.InstantUploadNotAvailableError`
                   if the server does not have a matching copy.  Values below
                   :data:`MIN_INSTANT_UPLOAD_SIZE` are ignored.
+            part_size: Optional part size in bytes for multipart uploads (defaults
+                  to :data:`DEFAULT_PART_SIZE`).
             status: Optional initial upload status to set for the file.
 
         Returns:
@@ -535,6 +539,7 @@ class FileClient(ABC):
                 path,
                 file,
                 instant_only=instant_only,
+                part_size=part_size,
                 status=status,
             )
         finally:
@@ -548,6 +553,7 @@ class FileClient(ABC):
         file: BinaryIO,
         *,
         instant_only: int | None = None,
+        part_size: int | None = None,
         status: UploadStatus | None = None,
     ) -> File:
         """Perform the actual file upload.

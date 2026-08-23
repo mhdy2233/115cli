@@ -796,8 +796,36 @@ class TestUploadCommand:
         )
         cmds["upload"].execute(args)
 
-        mock_uploader_cls.assert_called_once_with(mock_client, dry_run=True)
+        mock_uploader_cls.assert_called_once_with(
+            mock_client, dry_run=True, part_size=16 * 1024 * 1024, max_workers=1
+        )
 
+    @patch("cli115.cmds.upload.Uploader")
+    @patch.object(UploadCommand, "_create_client")
+    def test_part_size_and_max_workers_passed_to_uploader(
+        self, mock_create, mock_uploader_cls
+    ):
+        mock_client = MagicMock()
+        mock_create.return_value = mock_client
+        mock_uploader_cls.return_value.upload.return_value = None
+
+        parser, cmds = make_parser()
+        args = parser.parse_args(
+            [
+                "upload",
+                "--part-size",
+                "32MB",
+                "-j",
+                "4",
+                "/local/file.txt",
+                "/remote/file.txt",
+            ]
+        )
+        cmds["upload"].execute(args)
+
+        mock_uploader_cls.assert_called_once_with(
+            mock_client, dry_run=False, part_size=32 * 1024 * 1024, max_workers=4
+        )
     @patch.object(UploadCommand, "_create_client")
     def test_plan_flag_shows_plan(self, mock_create, tmp_path, capsys):
         local_file = tmp_path / "file.txt"

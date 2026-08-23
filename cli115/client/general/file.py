@@ -167,7 +167,12 @@ class FileClient(BaseFileClient, BaseClient):
             ).json()
         except FileExistsError:
             if parents:
-                return self.stat(path)  # directory already exists, return it
+                entry = self.stat(path)
+                if not entry.is_directory:
+                    raise FileExistsError(
+                        f"cannot create directory at file path: {path}"
+                    )
+                return entry
             raise
         return Directory(
             id=str(resp.get("cid") or resp.get("file_id", "")),
@@ -241,6 +246,7 @@ class FileClient(BaseFileClient, BaseClient):
         file: BinaryIO,
         *,
         instant_only: int | None = None,
+        part_size: int | None = None,
         status: UploadStatus | None = None,
     ) -> File:
         if not status:
@@ -293,13 +299,15 @@ class FileClient(BaseFileClient, BaseClient):
             file.set_stream(True)
 
         status.is_instant_uploaded = False
+        effective_part_size = part_size or MULTIPART_UPLOAD_PART_SIZE
         with status.start_upload(file_size) as progress, progress.patch_file(file):
-            if init_data and file_size > MULTIPART_UPLOAD_PART_SIZE:
+            if init_data and file_size > effective_part_size:
                 resp = self._uploader.multipart_upload(
                     file,
                     bucket=init_data["bucket"],
                     object=init_data["object"],
                     callback=init_data["callback"],
+                    part_size=effective_part_size,
                 )
             else:
                 resp = self._uploader.simple_upload(file, pid=dir_id, filename=filename)
