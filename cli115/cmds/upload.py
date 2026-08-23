@@ -173,64 +173,44 @@ class UploadProgress:
         self.show_progress = show_progress
         self._lock = threading.Lock()
 
-        self.overall_text: tqdm | None = None
-        self.overall_bar: tqdm | None = None
-        self.current_text: tqdm | None = None
-        self.current_bar: tqdm | None = None
-
-        # Per-worker progress bar slots for concurrent uploads
-        self._num_slots = 0
-        self._slots: list[tqdm] = []
-        self._free_slots: list[int] = []
-        self._entry_slots: dict[UploadEntry, int] = {}
-
+        self.bar: tqdm | None = None
         self.started_at: float | None = None
         self.ended_at: float | None = None
         self.total_files = 0
         self.total_size = 0
         self.completed_files = 0
-        self.completed_bytes = 0
         self.instant_count = 0
-        self.active_count = 0
 
-        self._current_entry: UploadEntry | None = None
-    @property
-    def current_entry(self) -> UploadEntry | None:
-        return self._current_entry
-    @current_entry.setter
-    def current_entry(self, entry: UploadEntry) -> None:
-        if not (self._current_entry is entry):
-            self._current_entry = entry
+        self._entry_transferred: dict[UploadEntry, int] = {}
+        self._active_entries: dict[UploadEntry, str] = {}
 
-            if self.current_bar is not None:
-                self.current_bar.reset(max(entry.size, 1))
+    def _update_description(self) -> None:
+        """Update progress bar description string. Must be called under self._lock."""
+        if self.bar is None:
+            return
 
-            if self.overall_text is not None:
-                self.overall_text.set_description_str(
-                    "{0} ({1}/{2})".format(
-                        entry.local_path,
-                        self.completed_files,
-                        self.total_files,
-                    ),
-                    refresh=True,
-                )
+        if self.uploader.max_workers == 1 and self._active_entries:
+            entry, msg = next(iter(self._active_entries.items()))
+            fname = os.path.basename(os.fspath(entry.local_path))
+            if msg and msg != "uploading":
+                desc = f"[{self.completed_files}/{self.total_files}] {fname} ({msg})"
+            else:
+                desc = f"[{self.completed_files}/{self.total_files}] {fname}"
+        elif len(self._active_entries) > 0:
+            active_names = [
+                os.path.basename(os.fspath(e.local_path))
+                for e in list(self._active_entries.keys())
+            ]
+            names_str = ", ".join(active_names[:3])
+            if len(active_names) > 3:
+                names_str += f"... (+{len(active_names) - 3})"
+            desc = f"[{self.completed_files}/{self.total_files} done, {len(self._active_entries)} active] {names_str}"
+        else:
+            desc = f"[{self.completed_files}/{self.total_files} done]"
 
-    def _acquire_slot(self, entry: UploadEntry) -> int | None:
-        if entry in self._entry_slots:
-            return self._entry_slots[entry]
-        if self._free_slots:
-            slot = self._free_slots.pop(0)
-            self._entry_slots[entry] = slot
-            return slot
-        return None
-
-    def _release_slot(self, entry: UploadEntry) -> None:
-        slot = self._entry_slots.pop(entry, None)
-        if slot is not None:
-            self._free_slots.append(slot)
-            if slot < len(self._slots):
-                self._slots[slot].clear()
-                self._slots[slot].set_description_str("", refresh=True)
+        if len(desc) > 60:
+            desc = desc[:57] + "..."
+        self.bar.set_description_str(desc, refresh=False)
 
     def init(self):
         self.uploader.on_entry_added.connect(self.on_added)
@@ -238,16 +218,9 @@ class UploadProgress:
 
     def close(self):
         self.ended_at = time.monotonic()
-        if self.overall_bar:
-            self.overall_text.close()
-            self.overall_bar.close()
-            if self.current_text is not None:
-                self.current_text.close()
-            if self.current_bar is not None:
-                self.current_bar.close()
-            for bar in self._slots:
-                bar.close()
-            print()  # ensure progress bars are cleared before final output
+        if self.bar is not None:
+            self.bar.close()
+            print()
 
     def report(self):
         if self.started_at is None or self.ended_at is None:
@@ -282,7 +255,16 @@ class UploadProgress:
 
         self.total_files = len(entries)
         self.total_size = max(sum(e.size for e in entries), 1)
-        self.create_progress_bars()
+        self.bar = tqdm(
+            total=self.total_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            dynamic_ncols=True,
+            leave=False,
+            desc=f"[0/{self.total_files}]",
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        )
 
         for entry in entries:
             self.connect_message_listener(entry)
@@ -290,65 +272,29 @@ class UploadProgress:
             self.connect_complete_listener(entry)
 
     def connect_message_listener(self, entry: UploadEntry):
-        def listener(sender, message) -> None:
+        def listener(sender, message: str) -> None:
             with self._lock:
-                fname = os.path.basename(os.fspath(entry.local_path))
-                if self.uploader.max_workers == 1:
-                    self.current_entry = entry
-                    if self.current_text is not None:
-                        self.current_text.set_description_str(message, refresh=True)
-                else:
-                    slot = self._acquire_slot(entry)
-                    if slot is not None and slot < len(self._slots):
-                        self._slots[slot].set_description_str(
-                            f"[{slot+1}] {fname} ({message})", refresh=True
-                        )
-                    if self.overall_text is not None:
-                        self.overall_text.set_description_str(
-                            f"uploading ({self.completed_files}/{self.total_files} completed, {self.active_count} active)",
-                            refresh=True,
-                        )
+                self._active_entries[entry] = message
+                self._update_description()
+                if self.bar is not None:
+                    self.bar.refresh()
 
         entry.status.on_message.connect(listener, weak=False)
 
     def connect_upload_listener(self, entry: UploadEntry):
         def listener(sender, progress: Progress) -> None:
-            fname = os.path.basename(os.fspath(entry.local_path))
             with self._lock:
-                self.active_count += 1
-                if self.uploader.max_workers == 1:
-                    self.current_entry = entry
-                    if self.current_bar is not None:
-                        self.current_bar.reset(max(entry.size, 1))
-                else:
-                    slot = self._acquire_slot(entry)
-                    if slot is not None and slot < len(self._slots):
-                        bar = self._slots[slot]
-                        bar.reset(max(entry.size, 1))
-                        bar.set_description_str(f"[{slot+1}] {fname}", refresh=True)
-                    if self.overall_text is not None:
-                        self.overall_text.set_description_str(
-                            f"uploading ({self.completed_files}/{self.total_files} completed, {self.active_count} active)",
-                            refresh=True,
-                        )
+                self._active_entries[entry] = "uploading"
+                self._update_description()
 
             def on_progress(sender, delta: int, new: int, old: int, completed: bool):
                 with self._lock:
-                    if self.uploader.max_workers == 1:
-                        if self.current_bar is not None:
-                            self.current_bar.n = new
-                            self.current_bar.refresh()
-                    else:
-                        slot = self._entry_slots.get(entry)
-                        if slot is not None and slot < len(self._slots):
-                            self._slots[slot].n = new
-                            self._slots[slot].refresh()
-
-                    if delta > 0:
-                        self.completed_bytes += delta
-                        if self.overall_bar is not None:
-                            self.overall_bar.n = min(self.completed_bytes, self.total_size)
-                            self.overall_bar.refresh()
+                    prev = self._entry_transferred.get(entry, 0)
+                    chunk_delta = new - prev
+                    if chunk_delta > 0:
+                        self._entry_transferred[entry] = new
+                        if self.bar is not None:
+                            self.bar.update(chunk_delta)
 
             progress.on_change.connect(on_progress, weak=False)
 
@@ -358,80 +304,25 @@ class UploadProgress:
         def listener(sender) -> None:
             with self._lock:
                 self.completed_files += 1
-                if self.active_count > 0:
-                    self.active_count -= 1
+                self._active_entries.pop(entry, None)
+
+                prev = self._entry_transferred.get(entry, 0)
+                remaining_bytes = entry.size - prev
+
                 if entry.status.is_instant_uploaded:
                     self.instant_count += 1
-                    self.completed_bytes += entry.size
-                    if self.overall_bar is not None:
-                        self.overall_bar.n = min(self.completed_bytes, self.total_size)
-                        self.overall_bar.refresh()
 
-                if self.uploader.max_workers == 1:
-                    self.current_entry = entry
-                else:
-                    self._release_slot(entry)
+                if remaining_bytes > 0:
+                    self._entry_transferred[entry] = entry.size
+                    if self.bar is not None:
+                        self.bar.update(remaining_bytes)
 
-                if self.overall_text is not None:
-                    self.overall_text.set_description_str(
-                        f"uploading ({self.completed_files}/{self.total_files} completed, {self.active_count} active)",
-                        refresh=True,
-                    )
+                self._update_description()
+                if self.bar is not None:
+                    self.bar.refresh()
 
         entry.status.on_complete.connect(listener, weak=False)
-    def create_progress_bars(self):
-        self.overall_text = tqdm(
-            total=0,
-            position=0,
-            dynamic_ncols=True,
-            leave=False,
-            bar_format="{desc}",
-            desc=f"processing... (0/{self.total_files})",
-        )
-        self.overall_bar = tqdm(
-            total=self.total_size,
-            position=1,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            dynamic_ncols=True,
-            leave=False,
-            bar_format=("{percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"),
-        )
-        if self.uploader.max_workers == 1:
-            self.current_text = tqdm(
-                total=0, position=2, dynamic_ncols=True, leave=False, bar_format="{desc}"
-            )
-            self.current_bar = tqdm(
-                total=1,
-                position=3,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                dynamic_ncols=True,
-                leave=False,
-                bar_format=(
-                    "{percentage:3.0f}%|{bar}| "
-                    "{n_fmt}/{total_fmt} "
-                    "[{elapsed}<{remaining}, {rate_fmt}]"
-                ),
-            )
-        else:
-            self._num_slots = min(self.uploader.max_workers, 8)
-            self._slots = [
-                tqdm(
-                    total=1,
-                    position=2 + i,
-                    unit="B",
-                    unit_scale=True,
-                    unit_divisor=1024,
-                    dynamic_ncols=True,
-                    leave=False,
-                    bar_format="{desc}: {percentage:3.0f}%|{bar:20}| {n_fmt}/{total_fmt} [{rate_fmt}]",
-                )
-                for i in range(self._num_slots)
-            ]
-            self._free_slots = list(range(self._num_slots))
+
     def __enter__(self):
         self.init()
         return self
