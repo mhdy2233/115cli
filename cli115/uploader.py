@@ -188,28 +188,16 @@ class Uploader:
     ) -> Directory | None:
         dest_id: str | None = None
         try:
-            entry = self._client.file.stat(dest_path)
-            if not entry.is_directory:
-                raise FileExistsError(
-                    f"cannot upload directory to a file path: {dest_path}"
-                )
+            dest_id = self._client.file._resolve_dir_id(dest_path)
             if not no_target_dir:
                 dir_name = os.path.basename(local_path)
                 dest_path = join_path(dest_path, dir_name)
                 try:
-                    child_stat = self._client.file.stat(dest_path)
-                    if not child_stat.is_directory:
-                        raise FileExistsError(
-                            f"cannot upload directory to a file path: {dest_path}"
-                        )
-                    dest_id = child_stat.id
+                    dest_id = self._client.file._resolve_dir_id(dest_path)
                 except FileNotFoundError:
                     dest_id = None
-            else:
-                dest_id = entry.id
         except FileNotFoundError:
             dest_id = None
-
         include_spec = PathSpec.from_lines("gitignore", include) if include else None
         exclude_spec = PathSpec.from_lines("gitignore", exclude) if exclude else None
 
@@ -451,15 +439,12 @@ def parse_115_export_tree(
 
     return existing_dirs, existing_files
 
-
 def fetch_remote_tree(
     client: Client, root_path: str, root_dir_id: str | None = None
 ) -> tuple[dict[str, Directory], set[str]]:
     """Fetch the remote directory tree structure and existing file paths.
 
-    First attempts fast 1-request server-side export_dir to obtain the entire
-    multi-level directory tree; falls back to recursive traversal if export_dir
-    fails or times out.
+    Uses 1-request server-side export_dir to obtain the entire multi-level tree.
 
     Returns:
         tuple of (existing_dirs, existing_files)
@@ -472,38 +457,25 @@ def fetch_remote_tree(
 
     if not root_dir_id:
         try:
-            root_stat = client.file.stat(root_path)
-            if not root_stat.is_directory:
-                return existing_dirs, existing_files
-            root_stat.path = root_path
-            root_dir_id = root_stat.id
-            existing_dirs[root_path] = root_stat
+            root_dir_id = client.file._resolve_dir_id(root_path)
         except Exception:
             return existing_dirs, existing_files
-    else:
-        root_stat = Directory(
-            id=root_dir_id,
-            parent_id="",
-            path=root_path,
-            name=os.path.basename(root_path),
-            pickcode="",
-            created_time=None,
-            modified_time=None,
-            open_time=None,
-        )
-        existing_dirs[root_path] = root_stat
-    try:
-        export_result = client.file.export_dir(root_stat, timeout=20.0)
-        content = export_result.get("content", "")
-        file_url = (
-            export_result.get("file_url")
-            or export_result.get("download_url")
-            or export_result.get("url")
-        )
-        if not content and file_url:
-            resp = client.file._api.get(file_url)
-            content = resp.text
 
+    root_stat = Directory(
+        id=root_dir_id,
+        parent_id="",
+        path=root_path,
+        name=os.path.basename(root_path),
+        pickcode="",
+        created_time=None,
+        modified_time=None,
+        open_time=None,
+    )
+    existing_dirs[root_path] = root_stat
+
+    try:
+        export_result = client.file.export_dir(root_stat, timeout=30.0)
+        content = export_result.get("content", "")
         if content:
             parsed_dirs, parsed_files = parse_115_export_tree(content, root_path)
             existing_files.update(parsed_files)
@@ -519,27 +491,15 @@ def fetch_remote_tree(
                         modified_time=None,
                         open_time=None,
                     )
-            return existing_dirs, existing_files
-    except Exception:
-        pass
-
-    # 2. Fallback to recursive traversal
-    def _traverse(current_dir: Directory) -> None:
-        try:
-            items = list(client.file.list(current_dir))
-        except Exception:
-            return
-
-        for item in items:
-            item_path = normalize_path(
-                item.path if item.path else join_path(current_dir.path, item.name)
+            logger.debug(
+                f"Successfully parsed remote tree via export_dir: {len(existing_files)} files found on cloud"
             )
-            if item.is_directory:
-                item.path = item_path
-                existing_dirs[item_path] = item
-                _traverse(item)
-            else:
-                existing_files.add(item_path)
+            return existing_dirs, existing_files
+        else:
+            logger.warning(
+                f"export_dir task succeeded but returned empty content: {export_result}"
+            )
+    except Exception as exc:
+        logger.warning(f"export_dir task failed: {exc}", exc_info=True)
 
-    _traverse(existing_dirs[root_path])
     return existing_dirs, existing_files

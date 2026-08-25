@@ -299,8 +299,42 @@ class FileClient(BaseFileClient, BaseClient):
                 f"timed out waiting for export task {export_id} after {timeout}s"
             )
 
-        return result_data
+        # Fetch file content if url or pick_code is available
+        content = ""
+        file_url = (
+            result_data.get("file_url")
+            or result_data.get("download_url")
+            or result_data.get("url")
+            or result_data.get("down_url")
+        )
+        pick_code = result_data.get("pick_code") or result_data.get("pickcode")
 
+        if file_url:
+            try:
+                resp = self._api.get(file_url)
+                if resp.status_code == 200:
+                    content = resp.text
+            except Exception as exc:
+                logger.debug(f"Failed to fetch content from file_url: {exc}")
+
+        if not content and pick_code:
+            try:
+                dl_info = self.url(pick_code)
+                if dl_info and dl_info.url:
+                    resp = self._api.get(
+                        dl_info.url,
+                        headers={
+                            "User-Agent": dl_info.user_agent,
+                            "Cookie": dl_info.cookies,
+                        },
+                    )
+                    if resp.status_code == 200:
+                        content = resp.text
+            except Exception as exc:
+                logger.debug(f"Failed to fetch content from pick_code: {exc}")
+
+        result_data["content"] = content
+        return result_data
     def _upload(
         self,
         path: str,
