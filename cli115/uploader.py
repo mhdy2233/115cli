@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import os
 from os import PathLike
+from typing import Sequence
 
 from blinker import Signal
 from pathspec import PathSpec
 
 from cli115.client import Client
 from cli115.client.models import Directory, File, UploadStatus
-from cli115.helpers import join_path, normalize_path
+from cli115.helpers import format_size, join_path, normalize_path
 
+logger = logging.getLogger("115cli.uploader")
 class UploadEntry:
     """A single file to be uploaded."""
 
@@ -207,9 +210,16 @@ class Uploader:
             exclude=exclude_spec,
         )
         dirs = _collect_dirs(files, dest_path)
+        logger.debug(
+            f"Scanned local directory '{local_path}': found {len(files)} files, {len(dirs)} subdirectories"
+        )
 
         # 1. Recursively construct remote directory tree to fetch existing directories and files
+        logger.debug(f"Fetching remote directory tree for destination '{dest_path}'...")
         existing_dirs, existing_files = fetch_remote_tree(self._client, dest_path)
+        logger.debug(
+            f"Remote tree fetched: {len(existing_dirs)} directories, {len(existing_files)} existing files on cloud"
+        )
 
         # 2. Perform in-memory comparison: ONLY keep files that do NOT exist on cloud
         needed_files: list[tuple[str, str]] = []
@@ -220,6 +230,10 @@ class Uploader:
                 continue
             needed_files.append((lf, rf))
 
+        logger.info(
+            f"Comparison completed: {len(files) - len(needed_files)} files already exist on cloud, {len(needed_files)} files queued for upload"
+        )
+
         # 3. Only queue files that actually need to be uploaded
         entries = [UploadEntry(lf, rf) for lf, rf in needed_files]
         self.entries.extend(entries)
@@ -227,6 +241,7 @@ class Uploader:
 
         norm_dest_path = normalize_path(dest_path)
         if self.dry_run or not entries:
+            logger.debug(f"Dry run or no files to upload. Returning early.")
             return existing_dirs.get(norm_dest_path)
 
         # 4. ONLY create/resolve directories for the needed files (grouped by directory)
@@ -235,6 +250,7 @@ class Uploader:
 
         dest_dir = existing_dirs.get(norm_dest_path)
         if dest_dir is None:
+            logger.debug(f"Creating root destination directory: '{dest_path}'")
             dest_dir = self._client.file.create_directory(dest_path, parents=True)
             dir_id_map[norm_dest_path] = dest_dir.id
             dir_id_map[dest_path] = dest_dir.id
@@ -242,12 +258,22 @@ class Uploader:
         for d in sorted(needed_dirs):
             norm_d = normalize_path(d)
             if norm_d not in dir_id_map and d not in dir_id_map:
+                logger.debug(f"Creating remote subdirectory: '{d}'")
                 sub_dir = self._client.file.create_directory(d, parents=True)
                 dir_id_map[norm_d] = sub_dir.id
                 dir_id_map[d] = sub_dir.id
+
+        # 5. Upload files
+        logger.info(
+            f"Starting upload of {len(entries)} file(s) with max_workers={max_workers}..."
+        )
+
         def _upload_single_entry(upload_entry: UploadEntry) -> None:
             upload_entry.status.start()
             parent_d = upload_entry.remote_path.rsplit("/", 1)[0]
+            logger.debug(
+                f"[{upload_entry.local_path} -> {upload_entry.remote_path}] Starting upload ({format_size(upload_entry.size)})"
+            )
             try:
                 self._client.file.upload(
                     upload_entry.remote_path,
@@ -258,8 +284,14 @@ class Uploader:
                     dir_id=dir_id_map.get(parent_d),
                     status=upload_entry.status,
                 )
+                logger.debug(
+                    f"[{upload_entry.remote_path}] Upload successfully finished"
+                )
             except Exception as exc:
                 upload_entry.error = exc
+                logger.error(
+                    f"[{upload_entry.remote_path}] Upload failed: {exc}", exc_info=True
+                )
             finally:
                 upload_entry.status._complete()
 

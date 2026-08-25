@@ -70,6 +70,8 @@ After [authenticating](#authentication) with `115cli login`, you can use the `11
 115cli upload /local/folder/ /remote/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
 # Upload multiple files concurrently with custom part size
 115cli upload /local/folder/ /remote/dir/ -j 4 --part-size 32M
+# Enable verbose debug logging
+115cli upload /local/folder/ /remote/dir/ --debug
 
 # Cloud download (offline download)
 115cli download quota

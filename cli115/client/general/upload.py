@@ -5,6 +5,7 @@ from email.utils import formatdate
 import hashlib
 import hmac
 import json
+import logging
 from typing import BinaryIO
 from urllib.parse import urlparse, urlsplit, urlunsplit
 import uuid
@@ -27,6 +28,7 @@ from .base import (
 DEFAULT_PART_SIZE = 16 * 1024 * 1024
 MULTIPART_UPLOAD_PART_SIZE = DEFAULT_PART_SIZE
 _CHUNK_SIZE = 64 * 1024
+logger = logging.getLogger("115cli.oss")
 
 
 class UploadClient:
@@ -83,18 +85,27 @@ class UploadClient:
             "userid": upload_info["user_id"],
             "userkey": upload_info["userkey"],
         }
+        logger.debug(
+            f"POST /initupload.php payload: fileid={payload['fileid']}, size={payload['filesize']}, target={payload['target']}"
+        )
         resp = self._post_upload_init(payload)
         status = int(resp["status"])
+        logger.debug(f"initupload response status: {status}")
         if status == 7:
             sign_check = str(resp.get("sign_check", ""))
             payload["sign_key"] = str(resp.get("sign_key", ""))
             payload["sign_val"] = (
                 hashlib.sha1(read_range(sign_check)).hexdigest().upper()
             )
+            logger.debug(
+                f"Server requested sign_check range {sign_check}, computed sign_val: {payload['sign_val']}"
+            )
             resp = self._post_upload_init(payload)
             status = int(resp["status"])
+            logger.debug(f"initupload second response status: {status}")
 
         if status != 2:
+            logger.debug(f"Instant upload failed: status={status}")
             raise InstantUploadNotAvailableError(
                 "instant upload is not available (file not found on server)",
                 response_data=resp,
@@ -171,8 +182,10 @@ class UploadClient:
             Parsed JSON response from the OSS complete-upload callback.
         """
         url = f"https://{bucket}.oss-cn-shenzhen.aliyuncs.com/{object}"
+        logger.debug(f"Fetching OSS STS token for multipart upload...")
         token = self._get_oss_token()
         upload_id = self._oss_multipart_upload_init(url, token)
+        logger.debug(f"Initialized OSS multipart session: upload_id={upload_id}, url={url}")
 
         parts: list[dict] = []
         part_number = 1
@@ -202,12 +215,14 @@ class UploadClient:
                         remaining -= len(buf)
                         yield buf
 
+                logger.debug(f"Uploading part {part_number} ({part_size_acc[0]} bytes)...")
                 part = self._oss_upload_part(
                     url, upload_id, part_number, _iter_part_content(), token, pool
                 )
                 part["Size"] = part_size_acc[0]
                 local_md5 = base64.b64encode(md5.digest()).decode()
                 server_md5 = part.pop("ContentMD5", "")
+                logger.debug(f"Part {part_number} uploaded: ETag={part.get('ETag')}, MD5={server_md5}")
                 if server_md5 and server_md5 != local_md5:
                     raise RuntimeError(
                         f"part {part_number} MD5 mismatch: "
@@ -217,10 +232,10 @@ class UploadClient:
                 parts.append(part)
                 part_number += 1
 
+        logger.debug(f"Completing OSS multipart upload ({len(parts)} parts)...")
         return self._oss_multipart_upload_complete(
             url, upload_id, callback, parts, token
         )
-
     def _post_upload_init(self, payload: dict) -> dict:
         resp = self._api.post(
             Endpoint.UPLB + "/4.0/initupload.php",

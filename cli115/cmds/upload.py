@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import logging
 import os
 import shutil
 import sys
 import threading
 import time
-
 from cli115.client.models import Progress
 from cli115.cmds.base import BaseCommand, WorkerCommand
 from cli115.cmds.formatter import PairFormatterMixin, format_entry
@@ -100,6 +100,15 @@ class UploadCommand(PairFormatterMixin, WorkerCommand, BaseCommand):
             help="Only show files that would be uploaded without uploading",
         )
         parser.add_argument(
+            "-v",
+            "--verbose",
+            "--debug",
+            dest="debug",
+            action="store_true",
+            default=False,
+            help="Enable debug logging to display detailed upload operations",
+        )
+        parser.add_argument(
             "-s",
             "--silent",
             action="store_true",
@@ -108,6 +117,14 @@ class UploadCommand(PairFormatterMixin, WorkerCommand, BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
+        if getattr(args, "debug", False):
+            logging.basicConfig(
+                level=logging.DEBUG,
+                format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+                datefmt="%H:%M:%S",
+                force=True,
+            )
+
         part_size = args.part_size
         if part_size is None and self.cfg and "upload" in self.cfg:
             part_size_str = self.cfg.get("upload", "part_size", fallback=None)
@@ -130,7 +147,7 @@ class UploadCommand(PairFormatterMixin, WorkerCommand, BaseCommand):
         with UploadProgress(
             self.uploader,
             show_plan=args.plan or args.dry_run,
-            show_progress=not args.silent and not args.dry_run,
+            show_progress=not args.silent and not args.dry_run and not getattr(args, "debug", False),
         ):
             result = self.run_worker(args)
 

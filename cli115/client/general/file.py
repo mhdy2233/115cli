@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import BinaryIO
@@ -30,6 +31,8 @@ from .base import (
     Endpoint,
 )
 from .upload import MULTIPART_UPLOAD_PART_SIZE, UploadClient
+
+logger = logging.getLogger("115cli.file")
 
 
 class FileClient(BaseFileClient, BaseClient):
@@ -327,17 +330,18 @@ class FileClient(BaseFileClient, BaseClient):
         filename = os.path.basename(path)
         if dir_id is None:
             dir_id = self._resolve_dir_id(parent_path)
+
         status.set_message("calculating file hash...")
         sha1, file_size = sha1_file(file)
+        logger.debug(f"[{path}] Calculated SHA-1: {sha1}, size: {file_size} bytes")
         status.set_message(f"file sha1 calculated: {sha1}, size: {file_size} bytes")
 
         # Only attempt instant upload when the file meets the minimum size.
-        # The initupload.php response (status=1) is preserved so a subsequent
-        # multipart upload can reuse the bucket/object/callback metadata.
         init_data: dict | None = None
         if file_size >= MIN_INSTANT_UPLOAD_SIZE:
             status.set_message("attempting instant upload")
             force_instant = instant_only is not None and file_size >= instant_only
+            logger.debug(f"[{path}] Probing instant upload (pid={dir_id})...")
             try:
                 self._uploader.instant_upload(
                     file=file,
@@ -347,9 +351,11 @@ class FileClient(BaseFileClient, BaseClient):
                     dir_id=dir_id,
                 )
                 status.is_instant_uploaded = True
+                logger.info(f"[{path}] Instant upload (秒传) succeeded!")
                 return self.stat(path)
             except Exception as exc:
                 status.instant_upload_error = exc
+                logger.debug(f"[{path}] Instant upload unavailable ({exc}), proceeding to physical upload")
                 if force_instant:
                     raise
                 if isinstance(exc, InstantUploadNotAvailableError):
@@ -363,6 +369,7 @@ class FileClient(BaseFileClient, BaseClient):
         effective_part_size = part_size or MULTIPART_UPLOAD_PART_SIZE
         with status.start_upload(file_size) as progress, progress.patch_file(file):
             if init_data and file_size > effective_part_size:
+                logger.debug(f"[{path}] Starting OSS multipart upload (part_size={effective_part_size})...")
                 resp = self._uploader.multipart_upload(
                     file,
                     bucket=init_data["bucket"],
@@ -371,11 +378,11 @@ class FileClient(BaseFileClient, BaseClient):
                     part_size=effective_part_size,
                 )
             else:
+                logger.debug(f"[{path}] Starting simple form upload...")
                 resp = self._uploader.simple_upload(file, pid=dir_id, filename=filename)
         data = resp["data"]
-
+        logger.debug(f"[{path}] Upload completed successfully (file_id={data.get('file_id')})")
         status.set_message("upload completed")
-
         return File(
             id=str(data.get("file_id", "")),
             parent_id=str(dir_id),
