@@ -319,19 +319,36 @@ class FileClient(BaseFileClient, BaseClient):
 
         if not content and pick_code:
             try:
-                dl_info = self.url(pick_code)
-                if dl_info and dl_info.url:
-                    resp = self._api.get(
-                        dl_info.url,
+                resp = self._api.post_encrypted(
+                    Endpoint.PROAPI + "/app/chrome/downurl",
+                    data={"pickcode": pick_code},
+                )
+                raw_data = resp.json()
+                dl_url = ""
+                for item in raw_data.values():
+                    if isinstance(item, dict):
+                        if item.get("pick_code") == pick_code and "url" in item:
+                            dl_url = item["url"].get("url", "") if isinstance(item["url"], dict) else str(item["url"])
+                            break
+                        elif "url" in item and isinstance(item["url"], dict) and "url" in item["url"]:
+                            dl_url = item["url"]["url"]
+                            break
+
+                if dl_url:
+                    file_resp = self._api.get(
+                        dl_url,
                         headers={
-                            "User-Agent": dl_info.user_agent,
-                            "Cookie": dl_info.cookies,
+                            "User-Agent": DEFAULT_USER_AGENT,
+                            "Referer": "https://115.com/",
                         },
                     )
-                    if resp.status_code == 200:
-                        content = resp.text
+                    if file_resp.status_code == 200:
+                        content = file_resp.text
+                        logger.debug(
+                            f"Successfully downloaded directory tree content via pick_code ({len(content)} chars)"
+                        )
             except Exception as exc:
-                logger.debug(f"Failed to fetch content from pick_code: {exc}")
+                logger.debug(f"Failed to fetch content from pick_code {pick_code}: {exc}", exc_info=True)
 
         result_data["content"] = content
         return result_data
@@ -431,29 +448,43 @@ class FileClient(BaseFileClient, BaseClient):
         )
 
     def url(self, path: str | File, *, user_agent: str | None = None) -> DownloadUrl:
-        entry = self._resolve_entry(path)
-        if entry.is_directory:
-            raise IsADirectoryError("cannot get download info for a directory")
-
+        if isinstance(path, File):
+            pickcode = path.pickcode
+            entry_name = path.name
+            entry_size = path.size
+            entry_sha1 = path.sha1
+        elif isinstance(path, str) and len(path) == 17 and "/" not in path and "\\" not in path:
+            pickcode = path
+            entry_name = ""
+            entry_size = 0
+            entry_sha1 = ""
+        else:
+            entry = self._resolve_entry(path)
+            if entry.is_directory:
+                raise IsADirectoryError("cannot get download info for a directory")
+            pickcode = entry.pickcode
+            entry_name = entry.name
+            entry_size = entry.size
+            entry_sha1 = entry.sha1
         ua = user_agent or self._api.headers.get("User-Agent", DEFAULT_USER_AGENT)
         resp = self._api.post_encrypted(
             Endpoint.PROAPI + "/app/chrome/downurl",
-            data={"pickcode": entry.pickcode},
+            data={"pickcode": pickcode},
             headers={"User-Agent": ua},
         )
         raw_data = resp.json()
         download_url = ""
         for item in raw_data.values():
-            if isinstance(item, dict) and item["pick_code"] == entry.pickcode:
+            if isinstance(item, dict) and item.get("pick_code") == pickcode:
                 download_url = item["url"]["url"]
                 break
 
         cookie_str = resp.request.headers["Cookie"]
         return DownloadUrl(
             url=download_url,
-            file_name=entry.name,
-            file_size=entry.size,
-            sha1=entry.sha1,
+            file_name=entry_name,
+            file_size=entry_size,
+            sha1=entry_sha1,
             user_agent=ua,
             referer="https://115.com/",
             cookies=cookie_str,
