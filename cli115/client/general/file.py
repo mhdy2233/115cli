@@ -309,11 +309,19 @@ class FileClient(BaseFileClient, BaseClient):
         )
         pick_code = result_data.get("pick_code") or result_data.get("pickcode")
 
+        def _decode_bytes(raw: bytes) -> str:
+            for enc in ["utf-16", "utf-16-le", "utf-8", "gb18030", "gbk"]:
+                try:
+                    return raw.decode(enc)
+                except Exception:
+                    continue
+            return raw.decode("utf-8", errors="replace")
+
         if file_url:
             try:
                 resp = self._api.get(file_url)
                 if resp.status_code == 200:
-                    content = resp.text
+                    content = _decode_bytes(resp.content)
             except Exception as exc:
                 logger.debug(f"Failed to fetch content from file_url: {exc}")
 
@@ -328,9 +336,17 @@ class FileClient(BaseFileClient, BaseClient):
                 for item in raw_data.values():
                     if isinstance(item, dict):
                         if item.get("pick_code") == pick_code and "url" in item:
-                            dl_url = item["url"].get("url", "") if isinstance(item["url"], dict) else str(item["url"])
+                            dl_url = (
+                                item["url"].get("url", "")
+                                if isinstance(item["url"], dict)
+                                else str(item["url"])
+                            )
                             break
-                        elif "url" in item and isinstance(item["url"], dict) and "url" in item["url"]:
+                        elif (
+                            "url" in item
+                            and isinstance(item["url"], dict)
+                            and "url" in item["url"]
+                        ):
                             dl_url = item["url"]["url"]
                             break
 
@@ -343,12 +359,15 @@ class FileClient(BaseFileClient, BaseClient):
                         },
                     )
                     if file_resp.status_code == 200:
-                        content = file_resp.text
+                        content = _decode_bytes(file_resp.content)
                         logger.debug(
                             f"Successfully downloaded directory tree content via pick_code ({len(content)} chars)"
                         )
             except Exception as exc:
-                logger.debug(f"Failed to fetch content from pick_code {pick_code}: {exc}", exc_info=True)
+                logger.debug(
+                    f"Failed to fetch content from pick_code {pick_code}: {exc}",
+                    exc_info=True,
+                )
 
         result_data["content"] = content
         return result_data

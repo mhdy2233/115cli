@@ -373,67 +373,83 @@ def parse_115_export_tree(
 ) -> tuple[set[str], set[str]]:
     """Parse 115 exported directory tree text into normalized directory paths and file paths.
 
+    Supports both 115 official directory tree format (| | |-) and standard ASCII tree format.
+
     Returns:
         tuple of (existing_dir_paths, existing_file_paths)
     """
     root_dest_path = normalize_path(root_dest_path)
-    existing_dirs: set[str] = {root_dest_path}
-    existing_files: set[str] = set()
-
     lines = content.splitlines()
     if not lines:
-        return existing_dirs, existing_files
+        return {root_dest_path}, set()
+
+    parsed_lines: list[tuple[int, str]] = []
+    # Check if content is 115 official format (contains '|-' or '|——')
+    is_115_official = any(("|-" in l or "|——" in l) for l in lines[:30])
+
+    if is_115_official:
+        for line in lines:
+            raw = line.rstrip("\r\n")
+            if not raw.strip() or "|" not in raw:
+                continue
+            bar_count = raw.count("|")
+            if "|——" in raw:
+                name = raw.rsplit("|——", 1)[-1].strip()
+            elif "|-" in raw:
+                name = raw.rsplit("|-", 1)[-1].strip()
+            else:
+                name = raw.lstrip("| -").strip()
+            if not name:
+                continue
+            depth = bar_count - 1
+            parsed_lines.append((depth, name))
+    else:
+        for line_idx, line in enumerate(lines):
+            raw = line.rstrip("\r\n")
+            if not raw.strip():
+                continue
+            clean = raw
+            indent = 0
+            while clean and (
+                clean[0] in (" ", "\t", "│", "|", "├", "└", "─", "—", "-")
+            ):
+                if clean[0] == "\t":
+                    indent += 4
+                else:
+                    indent += 1
+                clean = clean[1:]
+            name = clean.strip()
+            if not name or (indent == 0 and line_idx == 0):
+                continue
+            if "directories" in name and "files" in name:
+                continue
+            if "(" in name and name.endswith(")"):
+                name = name.rsplit("(", 1)[0].strip()
+            depth = (indent // 4) if indent >= 4 else (indent // 2 if indent > 0 else 1)
+            parsed_lines.append((depth, name))
+
+    if not parsed_lines:
+        return {root_dest_path}, set()
 
     stack = [root_dest_path]
+    existing_dirs = {root_dest_path}
+    existing_files: set[str] = set()
 
-    for line in lines:
-        raw = line.rstrip()
-        if not raw.strip():
+    total = len(parsed_lines)
+    for i in range(total):
+        depth, name = parsed_lines[i]
+        if depth == 0:
             continue
 
-        clean = raw
-        indent = 0
-        while clean and (clean[0] in (" ", "\t", "│", "|", "├", "└", "─", "—", "-")):
-            if clean[0] == "\t":
-                indent += 4
-            else:
-                indent += 1
-            clean = clean[1:]
-
-        name = clean.strip()
-        if not name or indent == 0:
-            continue
-
-        # Skip summary lines
-        if "directories" in name and "files" in name:
-            continue
-
-        is_dir = name.endswith("/") or name.endswith("\\")
-        name = name.rstrip("/\\").strip()
-
-        # Remove size in parentheses: e.g. movie.mp4 (1.5 GB) -> movie.mp4
-        if "(" in name and name.endswith(")"):
-            name = name.rsplit("(", 1)[0].strip()
-
-        # Determine level (depth from root)
-        if indent >= 4:
-            depth = indent // 4
-        elif indent > 0:
-            depth = indent // 2
-        else:
-            depth = 1
-
-        if depth < len(stack):
+        is_dir = i + 1 < total and parsed_lines[i + 1][0] > depth
+        if depth <= len(stack):
             stack = stack[:depth]
 
         full_path = normalize_path("/".join(stack + [name]))
 
         if is_dir:
             existing_dirs.add(full_path)
-            if depth == len(stack):
-                stack.append(name)
-            else:
-                stack = stack[:depth] + [name]
+            stack.append(name)
         else:
             existing_files.add(full_path)
 
