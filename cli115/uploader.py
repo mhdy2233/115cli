@@ -186,18 +186,29 @@ class Uploader:
         include: Sequence[str] | None = None,
         exclude: Sequence[str] | None = None,
     ) -> Directory | None:
+        dest_id: str | None = None
         try:
             entry = self._client.file.stat(dest_path)
             if not entry.is_directory:
                 raise FileExistsError(
                     f"cannot upload directory to a file path: {dest_path}"
                 )
-            # Remote exists as a directory: create a subdirectory with the local dir name.
             if not no_target_dir:
                 dir_name = os.path.basename(local_path)
                 dest_path = join_path(dest_path, dir_name)
+                try:
+                    child_stat = self._client.file.stat(dest_path)
+                    if not child_stat.is_directory:
+                        raise FileExistsError(
+                            f"cannot upload directory to a file path: {dest_path}"
+                        )
+                    dest_id = child_stat.id
+                except FileNotFoundError:
+                    dest_id = None
+            else:
+                dest_id = entry.id
         except FileNotFoundError:
-            pass
+            dest_id = None
 
         include_spec = PathSpec.from_lines("gitignore", include) if include else None
         exclude_spec = PathSpec.from_lines("gitignore", exclude) if exclude else None
@@ -209,17 +220,24 @@ class Uploader:
             include=include_spec,
             exclude=exclude_spec,
         )
-        dirs = _collect_dirs(files, dest_path)
         logger.debug(
-            f"Scanned local directory '{local_path}': found {len(files)} files, {len(dirs)} subdirectories"
+            f"Scanned local directory '{local_path}': found {len(files)} files"
         )
 
-        # 1. Recursively construct remote directory tree to fetch existing directories and files
-        logger.debug(f"Fetching remote directory tree for destination '{dest_path}'...")
-        existing_dirs, existing_files = fetch_remote_tree(self._client, dest_path)
-        logger.debug(
-            f"Remote tree fetched: {len(existing_dirs)} directories, {len(existing_files)} existing files on cloud"
-        )
+        # 1. Fetch remote directory tree to get all existing files
+        existing_dirs: dict[str, Directory] = {}
+        existing_files: set[str] = set()
+
+        if dest_id is not None:
+            logger.debug(
+                f"Fetching remote directory tree for destination '{dest_path}' (id={dest_id})..."
+            )
+            existing_dirs, existing_files = fetch_remote_tree(
+                self._client, dest_path, root_dir_id=dest_id
+            )
+            logger.debug(
+                f"Remote tree fetched: {len(existing_files)} existing files found on cloud"
+            )
 
         # 2. Perform in-memory comparison: ONLY keep files that do NOT exist on cloud
         needed_files: list[tuple[str, str]] = []
@@ -241,15 +259,40 @@ class Uploader:
 
         norm_dest_path = normalize_path(dest_path)
         if self.dry_run or not entries:
-            logger.debug(f"Dry run or no files to upload. Returning early.")
-            return existing_dirs.get(norm_dest_path)
+            logger.debug("Dry run or no files to upload. Returning early.")
+            if dest_id is not None:
+                return existing_dirs.get(norm_dest_path) or Directory(
+                    id=dest_id,
+                    parent_id="",
+                    path=dest_path,
+                    name=os.path.basename(dest_path),
+                    pickcode="",
+                    created_time=None,
+                    modified_time=None,
+                    open_time=None,
+                )
+            return None
 
-        # 4. ONLY create/resolve directories for the needed files (grouped by directory)
+        # 4. ONLY create/resolve parent directories for the needed files (grouped by directory)
         needed_dirs = _collect_dirs(needed_files, dest_path)
-        dir_id_map: dict[str, str] = {d: entry.id for d, entry in existing_dirs.items()}
+        dir_id_map: dict[str, str] = {
+            d: entry.id for d, entry in existing_dirs.items() if entry.id
+        }
 
-        dest_dir = existing_dirs.get(norm_dest_path)
-        if dest_dir is None:
+        if dest_id is not None:
+            dir_id_map[norm_dest_path] = dest_id
+            dir_id_map[dest_path] = dest_id
+            dest_dir = existing_dirs.get(norm_dest_path) or Directory(
+                id=dest_id,
+                parent_id="",
+                path=dest_path,
+                name=os.path.basename(dest_path),
+                pickcode="",
+                created_time=None,
+                modified_time=None,
+                open_time=None,
+            )
+        else:
             logger.debug(f"Creating root destination directory: '{dest_path}'")
             dest_dir = self._client.file.create_directory(dest_path, parents=True)
             dir_id_map[norm_dest_path] = dest_dir.id
@@ -262,7 +305,6 @@ class Uploader:
                 sub_dir = self._client.file.create_directory(d, parents=True)
                 dir_id_map[norm_d] = sub_dir.id
                 dir_id_map[d] = sub_dir.id
-
         # 5. Upload files
         logger.info(
             f"Starting upload of {len(entries)} file(s) with max_workers={max_workers}..."
@@ -411,7 +453,7 @@ def parse_115_export_tree(
 
 
 def fetch_remote_tree(
-    client: Client, root_path: str
+    client: Client, root_path: str, root_dir_id: str | None = None
 ) -> tuple[dict[str, Directory], set[str]]:
     """Fetch the remote directory tree structure and existing file paths.
 
@@ -428,16 +470,28 @@ def fetch_remote_tree(
     existing_dirs: dict[str, Directory] = {}
     existing_files: set[str] = set()
 
-    try:
-        root_stat = client.file.stat(root_path)
-        if not root_stat.is_directory:
+    if not root_dir_id:
+        try:
+            root_stat = client.file.stat(root_path)
+            if not root_stat.is_directory:
+                return existing_dirs, existing_files
+            root_stat.path = root_path
+            root_dir_id = root_stat.id
+            existing_dirs[root_path] = root_stat
+        except Exception:
             return existing_dirs, existing_files
-        root_stat.path = root_path
+    else:
+        root_stat = Directory(
+            id=root_dir_id,
+            parent_id="",
+            path=root_path,
+            name=os.path.basename(root_path),
+            pickcode="",
+            created_time=None,
+            modified_time=None,
+            open_time=None,
+        )
         existing_dirs[root_path] = root_stat
-    except Exception:
-        return existing_dirs, existing_files
-
-    # 1. Attempt fast 1-request export_dir to fetch all subdirectories & files at once
     try:
         export_result = client.file.export_dir(root_stat, timeout=20.0)
         content = export_result.get("content", "")
