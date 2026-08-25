@@ -306,10 +306,86 @@ def _collect_dirs(files: list[tuple[str, str]], dest_path: str) -> set[str]:
     return dirs
 
 
+def parse_115_export_tree(
+    content: str, root_dest_path: str
+) -> tuple[set[str], set[str]]:
+    """Parse 115 exported directory tree text into normalized directory paths and file paths.
+
+    Returns:
+        tuple of (existing_dir_paths, existing_file_paths)
+    """
+    root_dest_path = normalize_path(root_dest_path)
+    existing_dirs: set[str] = {root_dest_path}
+    existing_files: set[str] = set()
+
+    lines = content.splitlines()
+    if not lines:
+        return existing_dirs, existing_files
+
+    stack = [root_dest_path]
+
+    for line in lines:
+        raw = line.rstrip()
+        if not raw.strip():
+            continue
+
+        clean = raw
+        indent = 0
+        while clean and (clean[0] in (" ", "\t", "│", "|", "├", "└", "─", "—", "-")):
+            if clean[0] == "\t":
+                indent += 4
+            else:
+                indent += 1
+            clean = clean[1:]
+
+        name = clean.strip()
+        if not name or indent == 0:
+            continue
+
+        # Skip summary lines
+        if "directories" in name and "files" in name:
+            continue
+
+        is_dir = name.endswith("/") or name.endswith("\\")
+        name = name.rstrip("/\\").strip()
+
+        # Remove size in parentheses: e.g. movie.mp4 (1.5 GB) -> movie.mp4
+        if "(" in name and name.endswith(")"):
+            name = name.rsplit("(", 1)[0].strip()
+
+        # Determine level (depth from root)
+        if indent >= 4:
+            depth = indent // 4
+        elif indent > 0:
+            depth = indent // 2
+        else:
+            depth = 1
+
+        if depth < len(stack):
+            stack = stack[:depth]
+
+        full_path = normalize_path("/".join(stack + [name]))
+
+        if is_dir:
+            existing_dirs.add(full_path)
+            if depth == len(stack):
+                stack.append(name)
+            else:
+                stack = stack[:depth] + [name]
+        else:
+            existing_files.add(full_path)
+
+    return existing_dirs, existing_files
+
+
 def fetch_remote_tree(
     client: Client, root_path: str
 ) -> tuple[dict[str, Directory], set[str]]:
-    """Recursively fetch the remote directory tree structure and existing file paths.
+    """Fetch the remote directory tree structure and existing file paths.
+
+    First attempts fast 1-request server-side export_dir to obtain the entire
+    multi-level directory tree; falls back to recursive traversal if export_dir
+    fails or times out.
 
     Returns:
         tuple of (existing_dirs, existing_files)
@@ -329,6 +405,39 @@ def fetch_remote_tree(
     except Exception:
         return existing_dirs, existing_files
 
+    # 1. Attempt fast 1-request export_dir to fetch all subdirectories & files at once
+    try:
+        export_result = client.file.export_dir(root_stat, timeout=20.0)
+        content = export_result.get("content", "")
+        file_url = (
+            export_result.get("file_url")
+            or export_result.get("download_url")
+            or export_result.get("url")
+        )
+        if not content and file_url:
+            resp = client.file._api.get(file_url)
+            content = resp.text
+
+        if content:
+            parsed_dirs, parsed_files = parse_115_export_tree(content, root_path)
+            existing_files.update(parsed_files)
+            for d in parsed_dirs:
+                if d not in existing_dirs:
+                    existing_dirs[d] = Directory(
+                        id="",
+                        parent_id="",
+                        path=d,
+                        name=os.path.basename(d),
+                        pickcode="",
+                        created_time=None,
+                        modified_time=None,
+                        open_time=None,
+                    )
+            return existing_dirs, existing_files
+    except Exception:
+        pass
+
+    # 2. Fallback to recursive traversal
     def _traverse(current_dir: Directory) -> None:
         try:
             items = list(client.file.list(current_dir))
