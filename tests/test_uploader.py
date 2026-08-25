@@ -117,8 +117,32 @@ class TestUploadDirectory:
             f"{expected_dest}/file.txt",
             str(tmp_path / "file.txt"),
             instant_only=None,
+            part_size=None,
+            check_exists=False,
+            dir_id=existing_dest_dir.id,
             status=uploader.entries[0].status,
         )
+
+    def test_upload_dir_in_memory_deduplication_skips_existing_files(self, tmp_path):
+        (tmp_path / "existing.txt").write_text("existing content")
+        (tmp_path / "new_file.txt").write_text("new content")
+
+        client = _make_client()
+        client.file.stat.return_value = make_dir(name="existing")
+        dest_dir = make_dir(name=tmp_path.name, id="888")
+        client.file.create_directory.return_value = dest_dir
+        # Mock list() returning existing.txt
+        client.file.list.return_value = [make_file(name="existing.txt")]
+
+        uploader = Uploader(client)
+        uploader.upload(str(tmp_path), "/remote/existing")
+
+        # Only new_file.txt should be queued and uploaded; existing.txt is excluded from queue
+        assert client.file.upload.call_count == 1
+        assert client.file.upload.call_args.args[0].endswith("new_file.txt")
+        assert len(uploader.entries) == 1
+        assert uploader.entries[0].remote_path.endswith("new_file.txt")
+        assert uploader.entries[0].error is None
     def test_upload_dir_to_remote_file_raises(self, tmp_path):
         (tmp_path / "file.txt").write_text("content")
 
@@ -383,3 +407,44 @@ class TestUploadConcurrencyAndPartSize:
         assert client.file.upload.call_count == 3
         for call in client.file.upload.call_args_list:
             assert call.kwargs["part_size"] == part_size
+
+    def test_uploader_defers_dir_creation_until_needed(self, tmp_path):
+        sub1 = tmp_path / "sub1"
+        sub1.mkdir()
+        (sub1 / "old.txt").write_text("old content")
+        sub2 = tmp_path / "sub2"
+        sub2.mkdir()
+        (sub2 / "new.txt").write_text("new content")
+
+        client = _make_client()
+        dest_dir = make_dir(name="existing", id="100", path="/remote/existing")
+        sub1_dir = make_dir(name="sub1", id="101", path="/remote/existing/sub1")
+
+        def mock_stat(p):
+            if p == "/remote/existing":
+                return dest_dir
+            if p == "/remote/existing/sub1":
+                return sub1_dir
+            raise FileNotFoundError(f"not found: {p}")
+
+        def mock_list(p):
+            if p == "/remote/existing/sub1":
+                return [make_file(name="old.txt")]
+            return []
+
+        client.file.stat.side_effect = mock_stat
+        client.file.list.side_effect = mock_list
+        client.file.create_directory.return_value = make_dir(name="sub2", id="102", path="/remote/existing/sub2")
+        client.file.upload.return_value = make_file(name="new.txt")
+
+        uploader = Uploader(client)
+        uploader.upload(str(tmp_path), "/remote/existing", no_target_dir=True)
+
+        # Only new.txt is queued
+        assert len(uploader.entries) == 1
+        assert uploader.entries[0].remote_path.endswith("sub2/new.txt")
+
+        # create_directory must NOT be called for sub1 (since sub1 already existed and had no needed files)
+        created_paths = [c.args[0] for c in client.file.create_directory.call_args_list]
+        assert "/remote/existing/sub1" not in created_paths
+        assert "/remote/existing/sub2" in created_paths

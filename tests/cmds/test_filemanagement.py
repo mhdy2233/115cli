@@ -15,6 +15,7 @@ from cli115.client.models import (
 )
 from cli115.cmds.cp import CpCommand
 from cli115.cmds.fetch import FetchCommand
+from cli115.cmds.export import ExportCommand
 from cli115.cmds.find import FindCommand
 from cli115.cmds.id import IdCommand
 from cli115.cmds.ls import LsCommand
@@ -951,3 +952,24 @@ class TestUrlCommand:
 
         output = capsys.readouterr().out
         assert f"--checksum=sha-1={_make_url().sha1}" in output
+
+
+class TestExportCommand:
+    @patch.object(ExportCommand, "_create_client")
+    def test_export_command_writes_file(self, mock_create, tmp_path):
+        mock_client = MagicMock()
+        target_dir = _make_dir(name="testfolder", path="/testfolder", id="111")
+        mock_client.file.stat.return_value = target_dir
+        mock_client.file.export_dir.return_value = {
+            "file_name": "testfolder_目录树.txt",
+            "content": "├── file1.mp4\n└── file2.mkv",
+        }
+        mock_create.return_value = mock_client
+
+        parser, cmds = make_parser()
+        out_file = tmp_path / "custom_tree.txt"
+        args = parser.parse_args(["export", "/testfolder", "-o", str(out_file)])
+        cmds["export"].execute(args)
+
+        assert out_file.exists()
+        assert "file1.mp4" in out_file.read_text(encoding="utf-8")

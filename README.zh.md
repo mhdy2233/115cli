@@ -89,6 +89,10 @@ pip install 115cli
 115cli share save https://115.com/s/1234567?password=6666 --dest /my/dir/
 115cli share save https://115.com/s/1234567?password=6666 /path/in/share/ --dest /my/dir/ --include *.mp4 --include *.mkv --exclude *.txt
 
+# 导出目录树
+115cli export /path/to/dir -o ./tree.txt
+115cli export --id 1234567 -o ./tree.txt
+
 # 串流
 115cli stream /path/to/video.mp4
 # 转码(使视频可用于串流)

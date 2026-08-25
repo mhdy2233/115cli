@@ -412,6 +412,22 @@ class FileClient(ABC):
             ``name`` already exists, a second entry sharing that name will be
             created.  Verify the new name is unique before calling this method.
         """
+    @abstractmethod
+    def export_dir(
+        self,
+        path: str | Directory,
+        *,
+        timeout: float = 60.0,
+    ) -> dict:
+        """Export a remote directory tree structure asynchronously.
+
+        Args:
+            path: Path or Directory object to export.
+            timeout: Maximum seconds to wait for export generation (default: 60s).
+
+        Returns:
+            Dictionary containing export task response / result details.
+        """
 
     @abstractmethod
     def move(self, src: str | FileSystemEntry, dest_dir: str | Directory) -> None:
@@ -496,6 +512,8 @@ class FileClient(ABC):
         *,
         instant_only: int | None = None,
         part_size: int | None = None,
+        check_exists: bool = True,
+        dir_id: str | None = None,
         status: UploadStatus | None = None,
     ) -> File:
         """Upload a file.
@@ -540,6 +558,8 @@ class FileClient(ABC):
                 file,
                 instant_only=instant_only,
                 part_size=part_size,
+                check_exists=check_exists,
+                dir_id=dir_id,
                 status=status,
             )
         finally:
@@ -554,6 +574,8 @@ class FileClient(ABC):
         *,
         instant_only: int | None = None,
         part_size: int | None = None,
+        check_exists: bool = True,
+        dir_id: str | None = None,
         status: UploadStatus | None = None,
     ) -> File:
         """Perform the actual file upload.

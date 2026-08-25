@@ -267,3 +267,28 @@ class TestRename:
         result = api_client.file.stat(f"{root_dir.path}/{new_name}")
         assert result.id == entry.id
         assert result.name == new_name
+
+class TestExportDir:
+    def test_export_dir_success(self):
+        client = make_client()
+        target_dir = make_dir(id="12345", name="myfolder", path="/myfolder")
+
+        def mock_request(url, **kwargs):
+            resp = MagicMock()
+            if url.endswith("/files/export_dir") and kwargs.get("data"):
+                resp.json.return_value = {"state": True, "data": {"export_id": "99999"}}
+            elif url.endswith("/files/export_dir") and kwargs.get("params"):
+                resp.json.return_value = {
+                    "state": True,
+                    "data": {
+                        "file_name": "myfolder_目录树.txt",
+                        "download_url": "https://example.com/tree.txt",
+                    },
+                }
+            return resp
+
+        client.file._api.post.side_effect = mock_request
+        client.file._api.get.side_effect = mock_request
+        res = client.file.export_dir(target_dir, timeout=5.0)
+        assert res["file_name"] == "myfolder_目录树.txt"
+        assert res["download_url"] == "https://example.com/tree.txt"

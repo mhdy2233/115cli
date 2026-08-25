@@ -264,22 +264,28 @@ class UploadProgress:
                         format_size(entry.size),
                     )
                 )
-
-        if not self.show_progress:
-            return
-
         self.total_files = len(entries)
         self.total_size = max(sum(e.size for e in entries), 1)
 
         for entry in entries:
+            self.connect_start_listener(entry)
             self.connect_message_listener(entry)
             self.connect_upload_listener(entry)
             self.connect_complete_listener(entry)
 
-        self._running = True
-        self._render_thread = threading.Thread(target=self._render_loop, daemon=True)
-        self._render_thread.start()
+        if self.show_progress:
+            self._running = True
+            self._render_thread = threading.Thread(
+                target=self._render_loop, daemon=True
+            )
+            self._render_thread.start()
+    def connect_start_listener(self, entry: UploadEntry) -> None:
+        def listener(sender) -> None:
+            with self._lock:
+                if entry not in self._active_trackers:
+                    self._active_trackers[entry] = ActiveFileTracker(entry)
 
+        entry.status.on_start.connect(listener, weak=False)
     def connect_message_listener(self, entry: UploadEntry) -> None:
         def listener(sender, message: str) -> None:
             with self._lock:
@@ -366,7 +372,7 @@ class UploadProgress:
 
             if self._active_trackers:
                 lines.append("Transferring:")
-                for entry, tracker in list(self._active_trackers.items())[:8]:
+                for entry, tracker in list(self._active_trackers.items()):
                     fname = os.path.basename(os.fspath(entry.local_path))
                     f_size = max(entry.size, 1)
                     f_percent = min(100.0, (tracker.transferred / f_size) * 100)
@@ -374,9 +380,14 @@ class UploadProgress:
                     f_remaining = max(0, entry.size - tracker.transferred)
                     f_eta = (f_remaining / f_speed) if f_speed > 0 else None
                     bar = _make_bar(f_percent, width=12)
-                    lines.append(
-                        f" * {fname}: {f_percent:3.0f}% [{bar}] {format_size(tracker.transferred)} / {format_size(entry.size)}, {format_size(f_speed)}/s, {_format_eta(f_eta)}"
-                    )
+                    if tracker.msg and tracker.msg != "uploading":
+                        lines.append(
+                            f" * {fname}: {f_percent:3.0f}% [{bar}] {format_size(tracker.transferred)} / {format_size(entry.size)} ({tracker.msg})"
+                        )
+                    else:
+                        lines.append(
+                            f" * {fname}: {f_percent:3.0f}% [{bar}] {format_size(tracker.transferred)} / {format_size(entry.size)}, {format_size(f_speed)}/s, {_format_eta(f_eta)}"
+                        )
             return lines
 
     def _render_loop(self) -> None:
@@ -426,6 +437,11 @@ class UploadProgress:
         if self.started_at is None or self.ended_at is None:
             return
         elapsed = max(0.001, self.ended_at - self.started_at)
+        if self.total_files == 0:
+            print(f"Elapsed time:  {_format_duration(elapsed)}")
+            print("All files are already up to date on cloud: 0 files to upload.")
+            return
+
         speed = self.total_size / elapsed
         print(
             f"Transferred:   {format_size(self.total_size)} / {format_size(self.total_size)}, 100%, {format_size(speed)}/s, ETA 0s\n"
@@ -433,7 +449,6 @@ class UploadProgress:
             f"Elapsed time:  {_format_duration(elapsed)}\n"
             f"Upload finished in {elapsed:.1f}s: {format_size(self.total_size)} total, {self.instant_count} of {self.total_files} files instantly uploaded"
         )
-
     def __enter__(self):
         self.init()
         return self

@@ -370,10 +370,17 @@ class UploadStatus:
     def __init__(self) -> None:
         self._is_instant_uploaded: bool | None = None
         self._instant_upload_error: Exception | None = None
+        self._is_started: bool = False
         self._is_completed: bool = False
+        self.on_start: Signal = Signal()
         self.on_message: Signal = Signal()
         self.on_upload: Signal = Signal()
         self.on_complete: Signal = Signal()
+
+    def start(self) -> None:
+        if not self._is_started:
+            self._is_started = True
+            self.on_start.send(self)
 
     @property
     def is_instant_uploaded(self) -> bool | None:

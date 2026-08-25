@@ -9,8 +9,7 @@ from pathspec import PathSpec
 
 from cli115.client import Client
 from cli115.client.models import Directory, File, UploadStatus
-from cli115.helpers import join_path
-
+from cli115.helpers import join_path, normalize_path
 
 class UploadEntry:
     """A single file to be uploaded."""
@@ -160,13 +159,17 @@ class Uploader:
         self.on_entry_added.send(self, entries=[upload_entry])
 
         if not self.dry_run:
-            return self._client.file.upload(
-                remote_path,
-                local_path,
-                instant_only=instant_only,
-                part_size=part_size,
-                status=upload_entry.status,
-            )
+            upload_entry.status.start()
+            try:
+                return self._client.file.upload(
+                    remote_path,
+                    local_path,
+                    instant_only=instant_only,
+                    part_size=part_size,
+                    status=upload_entry.status,
+                )
+            finally:
+                upload_entry.status._complete()
 
     def _upload_directory(
         self,
@@ -205,32 +208,60 @@ class Uploader:
         )
         dirs = _collect_dirs(files, dest_path)
 
-        entries = [UploadEntry(lf, rf) for lf, rf in files]
+        # 1. Recursively construct remote directory tree to fetch existing directories and files
+        existing_dirs, existing_files = fetch_remote_tree(self._client, dest_path)
+
+        # 2. Perform in-memory comparison: ONLY keep files that do NOT exist on cloud
+        needed_files: list[tuple[str, str]] = []
+        for lf, rf in files:
+            norm_rf = normalize_path(rf)
+            if norm_rf in existing_files:
+                # File already exists on cloud, skip
+                continue
+            needed_files.append((lf, rf))
+
+        # 3. Only queue files that actually need to be uploaded
+        entries = [UploadEntry(lf, rf) for lf, rf in needed_files]
         self.entries.extend(entries)
         self.on_entry_added.send(self, entries=entries)
 
-        if self.dry_run:
-            return
+        norm_dest_path = normalize_path(dest_path)
+        if self.dry_run or not entries:
+            return existing_dirs.get(norm_dest_path)
 
-        # Create destination directory
-        dest_dir = self._client.file.create_directory(dest_path, parents=True)
+        # 4. ONLY create/resolve directories for the needed files (grouped by directory)
+        needed_dirs = _collect_dirs(needed_files, dest_path)
+        dir_id_map: dict[str, str] = {d: entry.id for d, entry in existing_dirs.items()}
 
-        # Create intermediate directories
-        for d in sorted(dirs):
-            self._client.file.create_directory(d, parents=True)
+        dest_dir = existing_dirs.get(norm_dest_path)
+        if dest_dir is None:
+            dest_dir = self._client.file.create_directory(dest_path, parents=True)
+            dir_id_map[norm_dest_path] = dest_dir.id
+            dir_id_map[dest_path] = dest_dir.id
 
-        # Upload files
+        for d in sorted(needed_dirs):
+            norm_d = normalize_path(d)
+            if norm_d not in dir_id_map and d not in dir_id_map:
+                sub_dir = self._client.file.create_directory(d, parents=True)
+                dir_id_map[norm_d] = sub_dir.id
+                dir_id_map[d] = sub_dir.id
         def _upload_single_entry(upload_entry: UploadEntry) -> None:
+            upload_entry.status.start()
+            parent_d = upload_entry.remote_path.rsplit("/", 1)[0]
             try:
                 self._client.file.upload(
                     upload_entry.remote_path,
                     upload_entry.local_path,
                     instant_only=instant_only,
                     part_size=part_size,
+                    check_exists=False,
+                    dir_id=dir_id_map.get(parent_d),
                     status=upload_entry.status,
                 )
             except Exception as exc:
                 upload_entry.error = exc
+            finally:
+                upload_entry.status._complete()
 
         if max_workers > 1 and len(entries) > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -240,8 +271,6 @@ class Uploader:
                 _upload_single_entry(upload_entry)
 
         return dest_dir
-
-
 def _collect_files(
     local_dir: str,
     remote_dir: str,
@@ -275,3 +304,47 @@ def _collect_dirs(files: list[tuple[str, str]], dest_path: str) -> set[str]:
             dirs.add(parent)
             parent = parent.rsplit("/", 1)[0]
     return dirs
+
+
+def fetch_remote_tree(
+    client: Client, root_path: str
+) -> tuple[dict[str, Directory], set[str]]:
+    """Recursively fetch the remote directory tree structure and existing file paths.
+
+    Returns:
+        tuple of (existing_dirs, existing_files)
+        where existing_dirs maps normalized remote dir path to Directory object,
+        and existing_files is a set of normalized remote file paths.
+    """
+    root_path = normalize_path(root_path)
+    existing_dirs: dict[str, Directory] = {}
+    existing_files: set[str] = set()
+
+    try:
+        root_stat = client.file.stat(root_path)
+        if not root_stat.is_directory:
+            return existing_dirs, existing_files
+        root_stat.path = root_path
+        existing_dirs[root_path] = root_stat
+    except Exception:
+        return existing_dirs, existing_files
+
+    def _traverse(current_dir: Directory) -> None:
+        try:
+            items = list(client.file.list(current_dir))
+        except Exception:
+            return
+
+        for item in items:
+            item_path = normalize_path(
+                item.path if item.path else join_path(current_dir.path, item.name)
+            )
+            if item.is_directory:
+                item.path = item_path
+                existing_dirs[item_path] = item
+                _traverse(item)
+            else:
+                existing_files.add(item_path)
+
+    _traverse(existing_dirs[root_path])
+    return existing_dirs, existing_files

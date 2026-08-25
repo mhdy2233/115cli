@@ -89,6 +89,10 @@ After [authenticating](#authentication) with `115cli login`, you can use the `11
 115cli share save https://115.com/s/1234567?password=6666 --dest /my/dir/
 115cli share save https://115.com/s/1234567?password=6666 /path/in/share/ --dest /my/dir/ --include *.mp4 --include *.mkv --exclude *.txt
 
+# Export directory tree
+115cli export /path/to/dir -o ./tree.txt
+115cli export --id 1234567 -o ./tree.txt
+
 # Stream a video file
 115cli stream /path/to/video.mp4
 # Transcode a video file to make it available for streaming

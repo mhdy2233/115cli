@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import BinaryIO
-
 from cli115.client.base import (
     DEFAULT_PAGE_SIZE,
     FileClient as BaseFileClient,
@@ -22,7 +22,7 @@ from cli115.client.models import (
     UploadStatus,
 )
 from cli115.client.utils import parse_item, parse_ts
-from cli115.exceptions import InstantUploadNotAvailableError
+from cli115.exceptions import APIError, InstantUploadNotAvailableError
 from cli115.helpers import normalize_path, sha1_file, join_path
 from .base import (
     BaseClient,
@@ -240,6 +240,64 @@ class FileClient(BaseFileClient, BaseClient):
             data={f"fid[{i}]": id_ for i, id_ in enumerate(src_ids)} | {"pid": dest_id},
         )
 
+    def export_dir(
+        self,
+        path: str | Directory,
+        *,
+        timeout: float = 60.0,
+    ) -> dict:
+        if isinstance(path, Directory):
+            dir_id = path.id
+        else:
+            path = normalize_path(path)
+            dir_id = self._resolve_dir_id(path)
+
+        resp = self._api.post(
+            Endpoint.WEBAPI + "/files/export_dir",
+            data={"file_ids": str(dir_id), "target": f"U_1_{dir_id}"},
+        ).json()
+
+        export_id = (
+            resp.get("data", {}).get("export_id")
+            if isinstance(resp.get("data"), dict)
+            else resp.get("export_id") or resp.get("data")
+        )
+        if not export_id:
+            raise APIError(f"failed to initiate export: {resp}")
+
+        deadline = time.monotonic() + timeout
+        result_data = None
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            check_resp = self._api.get(
+                Endpoint.WEBAPI + "/files/export_dir",
+                params={"export_id": export_id},
+            ).json()
+
+            data = check_resp.get("data")
+            if check_resp.get("state") and isinstance(data, dict):
+                if (
+                    data.get("file_url")
+                    or data.get("download_url")
+                    or data.get("pick_code")
+                    or data.get("file_name")
+                ):
+                    result_data = data
+                    break
+                if data.get("status") in (1, "1", "completed", "finish"):
+                    result_data = data
+                    break
+            elif check_resp.get("state") and check_resp.get("file_url"):
+                result_data = check_resp
+                break
+
+        if result_data is None:
+            raise TimeoutError(
+                f"timed out waiting for export task {export_id} after {timeout}s"
+            )
+
+        return result_data
+
     def _upload(
         self,
         path: str,
@@ -247,6 +305,8 @@ class FileClient(BaseFileClient, BaseClient):
         *,
         instant_only: int | None = None,
         part_size: int | None = None,
+        check_exists: bool = True,
+        dir_id: str | None = None,
         status: UploadStatus | None = None,
     ) -> File:
         if not status:
@@ -254,18 +314,19 @@ class FileClient(BaseFileClient, BaseClient):
         path = normalize_path(path)
 
         # raise an error if the file already exists
-        status.set_message("checking for existing file...")
-        try:
-            self.stat(path)
-        except FileNotFoundError:
-            pass
-        else:
-            raise FileExistsError(f"remote path '{path}' already exists")
+        if check_exists:
+            status.set_message("checking for existing file...")
+            try:
+                self.stat(path)
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError(f"remote path '{path}' already exists")
 
         parent_path = os.path.dirname(path)
         filename = os.path.basename(path)
-        dir_id = self._resolve_dir_id(parent_path)
-
+        if dir_id is None:
+            dir_id = self._resolve_dir_id(parent_path)
         status.set_message("calculating file hash...")
         sha1, file_size = sha1_file(file)
         status.set_message(f"file sha1 calculated: {sha1}, size: {file_size} bytes")

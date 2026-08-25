@@ -16,6 +16,7 @@ from cli115.cmds.config import ConfigCommand
 from cli115.cmds.cp import CpCommand
 from cli115.cmds.df import DfCommand
 from cli115.cmds.download import DownloadCommand
+from cli115.cmds.export import ExportCommand
 from cli115.cmds.fetch import FetchCommand
 from cli115.cmds.find import FindCommand
 from cli115.cmds.id import IdCommand
@@ -42,6 +43,7 @@ COMMANDS = OrderedDict(
         ("cp", CpCommand),
         ("df", DfCommand),
         ("download", DownloadCommand),
+        ("export", ExportCommand),
         ("fetch", FetchCommand),
         ("find", FindCommand),
         ("id", IdCommand),
