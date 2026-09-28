@@ -170,12 +170,17 @@ class FileClient(BaseFileClient, BaseClient):
             ).json()
         except FileExistsError:
             if parents:
-                entry = self.stat(path)
-                if not entry.is_directory:
-                    raise FileExistsError(
-                        f"cannot create directory at file path: {path}"
-                    )
-                return entry
+                dir_id = self._resolve_dir_id(path)
+                return Directory(
+                    id=dir_id,
+                    parent_id=pid,
+                    name=name,
+                    path=path,
+                    pickcode="",
+                    created_time=None,
+                    modified_time=None,
+                    open_time=None,
+                )
             raise
         return Directory(
             id=str(resp.get("cid") or resp.get("file_id", "")),
@@ -247,7 +252,7 @@ class FileClient(BaseFileClient, BaseClient):
         self,
         path: str | Directory,
         *,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
     ) -> dict:
         if isinstance(path, Directory):
             dir_id = path.id
@@ -255,23 +260,37 @@ class FileClient(BaseFileClient, BaseClient):
             path = normalize_path(path)
             dir_id = self._resolve_dir_id(path)
 
-        resp = self._api.post(
-            Endpoint.WEBAPI + "/files/export_dir",
-            data={"file_ids": str(dir_id), "target": f"U_1_{dir_id}"},
-        ).json()
+        export_id = None
+        resp = None
+        for attempt in range(5):
+            try:
+                resp = self._api.post(
+                    Endpoint.WEBAPI + "/files/export_dir",
+                    data={"file_ids": str(dir_id), "target": f"U_1_{dir_id}"},
+                ).json()
+                export_id = (
+                    resp.get("data", {}).get("export_id")
+                    if isinstance(resp.get("data"), dict)
+                    else resp.get("export_id") or resp.get("data")
+                )
+                if export_id:
+                    break
+            except APIError as exc:
+                if getattr(exc, "errno", None) == 990005:
+                    logger.debug(
+                        f"Export task rate limited (errno 990005), waiting to retry ({attempt + 1}/5)..."
+                    )
+                    time.sleep(5.0)
+                    continue
+                raise
 
-        export_id = (
-            resp.get("data", {}).get("export_id")
-            if isinstance(resp.get("data"), dict)
-            else resp.get("export_id") or resp.get("data")
-        )
         if not export_id:
             raise APIError(f"failed to initiate export: {resp}")
 
         deadline = time.monotonic() + timeout
         result_data = None
         while time.monotonic() < deadline:
-            time.sleep(1.0)
+            time.sleep(2.0)
             check_resp = self._api.get(
                 Endpoint.WEBAPI + "/files/export_dir",
                 params={"export_id": export_id},
@@ -369,6 +388,10 @@ class FileClient(BaseFileClient, BaseClient):
                     exc_info=True,
                 )
 
+        if not content:
+            raise RuntimeError(
+                f"export_dir task {export_id} completed but failed to download tree content (result_data={result_data})"
+            )
         result_data["content"] = content
         return result_data
     def _upload(
@@ -438,14 +461,19 @@ class FileClient(BaseFileClient, BaseClient):
         status.is_instant_uploaded = False
         effective_part_size = part_size or MULTIPART_UPLOAD_PART_SIZE
         with status.start_upload(file_size) as progress, progress.patch_file(file):
-            if init_data and file_size > effective_part_size:
+            if init_data and "bucket" in init_data and file_size > effective_part_size:
                 logger.debug(f"[{path}] Starting OSS multipart upload (part_size={effective_part_size})...")
                 resp = self._uploader.multipart_upload(
                     file,
                     bucket=init_data["bucket"],
                     object=init_data["object"],
                     callback=init_data["callback"],
-                    part_size=effective_part_size,
+                    part_size=effective_part_size
+                )
+            elif file_size > 5 * 1024 * 1024 * 1024:
+                raise OSError(
+                    f"Cannot upload file > 5 GB ({format_size(file_size)}) via simple form upload "
+                    f"because OSS multipart credentials were not obtained: {status.instant_upload_error}"
                 )
             else:
                 logger.debug(f"[{path}] Starting simple form upload...")

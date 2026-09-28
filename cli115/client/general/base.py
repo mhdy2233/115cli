@@ -15,12 +15,8 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 )
 
-APP_USER_AGENT = (
-    "Mozilla/5.0 115disk/99.99.99.99 115Browser/99.99.99.99 "
-    "115wangpan_android/99.99.99.99"
-)
-
-APP_VERSION = "99.99.99.99"
+APP_USER_AGENT = "Mozilla/5.0 115disk/30.7.2.1"
+APP_VERSION = "30.7.2.1"
 
 
 logger = logging.getLogger(__name__)

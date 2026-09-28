@@ -186,16 +186,15 @@ class Uploader:
         include: Sequence[str] | None = None,
         exclude: Sequence[str] | None = None,
     ) -> Directory | None:
+        dir_name = os.path.basename(local_path)
+        norm_dest = normalize_path(dest_path)
+        # If remote_path already ends with the local directory name, don't double it
+        if not no_target_dir and os.path.basename(norm_dest) != dir_name:
+            dest_path = join_path(dest_path, dir_name)
+
         dest_id: str | None = None
         try:
             dest_id = self._client.file._resolve_dir_id(dest_path)
-            if not no_target_dir:
-                dir_name = os.path.basename(local_path)
-                dest_path = join_path(dest_path, dir_name)
-                try:
-                    dest_id = self._client.file._resolve_dir_id(dest_path)
-                except FileNotFoundError:
-                    dest_id = None
         except FileNotFoundError:
             dest_id = None
         include_spec = PathSpec.from_lines("gitignore", include) if include else None
@@ -228,10 +227,11 @@ class Uploader:
             )
 
         # 2. Perform in-memory comparison: ONLY keep files that do NOT exist on cloud
+        existing_files_lower = {f.lower() for f in existing_files}
         needed_files: list[tuple[str, str]] = []
         for lf, rf in files:
             norm_rf = normalize_path(rf)
-            if norm_rf in existing_files:
+            if norm_rf in existing_files or norm_rf.lower() in existing_files_lower:
                 # File already exists on cloud, skip
                 continue
             needed_files.append((lf, rf))
@@ -289,6 +289,14 @@ class Uploader:
         for d in sorted(needed_dirs):
             norm_d = normalize_path(d)
             if norm_d not in dir_id_map and d not in dir_id_map:
+                if norm_d in existing_dirs:
+                    try:
+                        resolved_id = self._client.file._resolve_dir_id(norm_d)
+                        dir_id_map[norm_d] = resolved_id
+                        dir_id_map[d] = resolved_id
+                        continue
+                    except FileNotFoundError:
+                        pass
                 logger.debug(f"Creating remote subdirectory: '{d}'")
                 sub_dir = self._client.file.create_directory(d, parents=True)
                 dir_id_map[norm_d] = sub_dir.id
@@ -431,8 +439,18 @@ def parse_115_export_tree(
     if not parsed_lines:
         return {root_dest_path}, set()
 
-    stack = [root_dest_path]
-    existing_dirs = {root_dest_path}
+    root_exported_name = parsed_lines[0][1]
+    norm_root = normalize_path(root_dest_path)
+    if norm_root.rsplit("/", 1)[-1] == root_exported_name:
+        base_root = norm_root
+    elif "/" + root_exported_name in norm_root:
+        idx = norm_root.find("/" + root_exported_name)
+        base_root = norm_root[: idx + len("/" + root_exported_name)]
+    else:
+        base_root = norm_root
+
+    stack = [base_root]
+    existing_dirs = {base_root}
     existing_files: set[str] = set()
 
     total = len(parsed_lines)
@@ -490,7 +508,7 @@ def fetch_remote_tree(
     existing_dirs[root_path] = root_stat
 
     try:
-        export_result = client.file.export_dir(root_stat, timeout=30.0)
+        export_result = client.file.export_dir(root_stat, timeout=120.0)
         content = export_result.get("content", "")
         if content:
             parsed_dirs, parsed_files = parse_115_export_tree(content, root_path)
@@ -516,6 +534,9 @@ def fetch_remote_tree(
                 f"export_dir task succeeded but returned empty content: {export_result}"
             )
     except Exception as exc:
-        logger.warning(f"export_dir task failed: {exc}", exc_info=True)
-
+        logger.error(f"export_dir task failed: {exc}", exc_info=True)
+        raise RuntimeError(
+            f"Failed to fetch cloud directory tree for '{root_path}': {exc}. "
+            "Aborting upload to avoid duplicate uploads."
+        ) from exc
     return existing_dirs, existing_files
