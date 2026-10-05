@@ -1,5 +1,8 @@
 from unittest.mock import MagicMock, patch
 
+import httpx
+import pytest
+
 from cli115.client.base import DownloadUrl, FileClient, RemoteFile
 
 
@@ -60,28 +63,31 @@ class TestRemoteFile:
         info = _make_info(file_size=10)
         rf = RemoteFile(info)
         mock_resp = MagicMock()
-        mock_resp.content = b"helloworld"
+        mock_resp.read.return_value = b"helloworld"
+        mock_resp.status_code = 200
         with patch("httpx.Client") as mock_cls:
             mock_client = mock_cls.return_value
-            mock_client.get.return_value = mock_resp
+            mock_client.stream.return_value.__enter__.return_value = mock_resp
             data = rf.read()
         assert data == b"helloworld"
-        mock_client.get.assert_called_once_with(
-            info.url, headers={"Range": "bytes=0-9"}
+        mock_client.stream.assert_called_once_with(
+            "GET", info.url, headers={"Range": "bytes=0-9"}
         )
 
     def test_read_partial_uses_range_header(self):
         info = _make_info(file_size=10)
         rf = RemoteFile(info)
         mock_resp = MagicMock()
-        mock_resp.content = b"hello"
+        mock_resp.read.return_value = b"hello"
+        mock_resp.status_code = 206
+        mock_resp.headers = {"Content-Range": "bytes 0-4/10"}
         with patch("httpx.Client") as mock_cls:
             mock_client = mock_cls.return_value
-            mock_client.get.return_value = mock_resp
+            mock_client.stream.return_value.__enter__.return_value = mock_resp
             data = rf.read(5)
         assert data == b"hello"
-        mock_client.get.assert_called_once_with(
-            info.url, headers={"Range": "bytes=0-4"}
+        mock_client.stream.assert_called_once_with(
+            "GET", info.url, headers={"Range": "bytes=0-4"}
         )
 
     def test_read_stream_mode_uses_iter_bytes(self):
@@ -89,7 +95,8 @@ class TestRemoteFile:
         rf = RemoteFile(info)
         rf.set_stream(True)
         mock_resp = MagicMock()
-        mock_resp.iter_bytes.return_value = iter([b"hello world"])
+        mock_resp.status_code = 200
+        mock_resp.iter_bytes.return_value = iter([b"hello", b" world"])
         mock_ctx = MagicMock()
         mock_ctx.__enter__.return_value = mock_resp
         mock_ctx.__exit__.return_value = False
@@ -99,13 +106,14 @@ class TestRemoteFile:
             data = rf.read()
         assert data == b"hello world"
         mock_client.stream.assert_called_once_with("GET", info.url)
-        mock_resp.iter_bytes.assert_called_once_with(None)
+        mock_resp.iter_bytes.assert_called_once_with(64 * 1024)
 
     def test_read_stream_mode_partial(self):
         info = _make_info(file_size=11)
         rf = RemoteFile(info)
         rf.set_stream(True)
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.iter_bytes.return_value = iter([b"hello", b" world"])
         mock_ctx = MagicMock()
         mock_ctx.__enter__.return_value = mock_resp
@@ -115,13 +123,14 @@ class TestRemoteFile:
             mock_client.stream.return_value = mock_ctx
             data = rf.read(5)
         assert data == b"hello"
-        mock_resp.iter_bytes.assert_called_once_with(5)
+        mock_resp.iter_bytes.assert_called_once_with(64 * 1024)
 
     def test_close_cleans_up_stream_and_client(self):
         info = _make_info(file_size=5)
         rf = RemoteFile(info)
         rf.set_stream(True)
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.iter_bytes.return_value = iter([b"x"])
         mock_ctx = MagicMock()
         mock_ctx.__enter__.return_value = mock_resp
@@ -133,6 +142,76 @@ class TestRemoteFile:
             rf.close()
         mock_ctx.__exit__.assert_called_once_with(None, None, None)
         mock_client.close.assert_called_once()
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_zero_read_does_not_request_or_advance(self, stream):
+        rf = RemoteFile(_make_info(file_size=10))
+        rf.set_stream(stream)
+        with patch("httpx.Client") as client:
+            assert rf.read(0) == b""
+            assert rf.tell() == 0
+            client.assert_not_called()
+
+    def test_stream_varying_reads_seek_and_mode_changes(self):
+        content = b"hello world"
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            range_header = request.headers.get("Range")
+            if not range_header:
+                return httpx.Response(200, content=content)
+            start, end = range_header.removeprefix("bytes=").split("-")
+            start, end = int(start), int(end) if end else len(content) - 1
+            return httpx.Response(206, content=content[start:end + 1], headers={
+                "Content-Range": f"bytes {start}-{end}/{len(content)}",
+            })
+
+        with RemoteFile(_make_info(file_size=len(content))) as rf:
+            rf._client = httpx.Client(transport=httpx.MockTransport(respond))
+            rf.set_stream(True)
+            assert rf.read(2) == b"he"
+            assert rf.read(4) == b"llo "
+            assert rf.read() == b"world"
+            rf.seek(1)
+            assert rf.read(2) == b"el"
+            rf.set_stream(False)
+            assert rf.read(2) == b"lo"
+            rf.set_stream(True)
+            assert rf.read() == b" world"
+            assert len(requests) == 4
+            rf.seek(100)
+            assert rf.tell() == 100 and rf.read() == b""
+            with pytest.raises(ValueError, match="negative"):
+                rf.seek(-1)
+            assert rf.tell() == 100
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_rejects_ignored_range_and_truncated_body(self, stream):
+        with RemoteFile(_make_info(file_size=10)) as rf:
+            rf._client = httpx.Client(transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=b"short")))
+            rf.set_stream(stream)
+            with pytest.raises(OSError, match="end|length"):
+                rf.read()
+            rf.seek(2)
+            with pytest.raises(OSError, match="byte range"):
+                rf.read(2)
+
+    def test_ignored_range_does_not_read_body(self):
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                pytest.fail("response body must not be read")
+
+        response = httpx.Response(200, stream=UnreadBody())
+        with RemoteFile(_make_info(file_size=10)) as rf:
+            rf._client = httpx.Client(transport=httpx.MockTransport(
+                lambda request: response))
+            rf.seek(2)
+            with pytest.raises(OSError, match="byte range"):
+                rf.read(2)
+            assert rf.tell() == 2
+        assert response.is_closed
 
 
 class TestFileClientOpen:

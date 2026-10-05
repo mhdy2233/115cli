@@ -2,6 +2,7 @@ import hashlib
 import time
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from cli115.client import Directory, File, SortField, SortOrder
@@ -233,7 +234,8 @@ class TestFind:
         assert entries[0].is_directory
         assert entries[0].path == sub_dir.path
 
-    def test_find_with_nonexistent_path(self):
+    @pytest.mark.parametrize("path", ["/nonexistent", "/file.txt"])
+    def test_find_with_nonexistent_path(self, path):
         client = make_client()
         # id=0 signals the path does not exist
 
@@ -244,11 +246,106 @@ class TestFind:
             return resp
 
         client.file._api.get.side_effect = mock_get
+        entries = client.file.find("query", path=path)
+        client.file._api.get.assert_not_called()
         with pytest.raises(FileNotFoundError):
-            len(client.file.find("query", path="/nonexistent"))
+            len(entries)
+        client.file._api.get.assert_called_once()
+
+
+class TestFindPagination:
+    @pytest.mark.parametrize(
+        ("path", "dir_id", "resolutions"),
+        [
+            ("/docs", "100", 1),
+            (make_dir(name="docs"), "100", 0),
+            (None, "0", 0),
+            ("", "0", 0),
+            ("/", "0", 0),
+        ],
+    )
+    def test_resolve_directory_once(self, path, dir_id, resolutions):
+        client = make_client()
+        requests = []
+
+        def mock_get(url, *, params):
+            requests.append((url, params))
+            response = MagicMock()
+            if url.endswith("/files/getid"):
+                assert params == {"path": "/docs"}
+                response.json.return_value = {"id": dir_id}
+            else:
+                assert url.endswith("/files/search")
+                assert params["cid"] == dir_id
+                offset, limit = params["offset"], params["limit"]
+                response.json.return_value = {
+                    "data": [
+                        {"fid": str(i), "cid": dir_id, "n": f"file-{i}.txt"}
+                        for i in range(offset, min(offset + limit, 401))
+                    ],
+                    "count": 401,
+                    "offset": offset,
+                    "limit": limit,
+                }
+            return response
+
+        client.file._api.get.side_effect = mock_get
+        entries = client.file.find("file", path=path)
+        assert requests == []
+        assert [entry.id for entry in entries] == [str(i) for i in range(401)]
+        assert len(requests) == 3 + resolutions
+        assert [
+            params["offset"]
+            for url, params in requests
+            if url.endswith("/files/search")
+        ] == [0, 200, 400]
+
+        requests.clear()
+        assert len(client.file.find("file", path=path)) == 401
+        assert len(requests) == 1 + resolutions
 
 
 class TestDownloadUrl:
+
+    @pytest.mark.parametrize("content", [b"hello", b""])
+    def test_open_pickcode_uses_response_metadata(self, content):
+        client = make_client()
+        pickcode = "12345678901234567"
+        sha1 = hashlib.sha1(content).hexdigest().upper()
+        response = client.file._api.post_encrypted.return_value
+        response.json.return_value = {"200": {
+            "pick_code": pickcode, "file_name": "test.bin",
+            "file_size": str(len(content)), "sha1": sha1,
+            "url": {"url": "https://example.com/test.bin"},
+        }}
+        response.request.headers = {"Cookie": "UID=test"}
+        with client.file.open(pickcode, user_agent="test-agent") as remote:
+            remote._client = httpx.Client(transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=content)))
+            assert remote.name == "test.bin"
+            assert remote.size == len(content)
+            assert remote._info.sha1 == sha1
+            assert remote.read() == content
+        client.file._api.post_encrypted.assert_called_once()
+        client.file._api.get.assert_not_called()
+
+    @pytest.mark.parametrize("field,value", [
+        ("file_size", None), ("file_size", "invalid"), ("file_size", -1),
+        ("file_size", False), ("file_name", None), ("file_name", ""),
+        ("url", None), ("url", {}), ("pick_code", "different"),
+    ])
+    def test_pickcode_missing_metadata_or_url_fails(self, field, value):
+        client = make_client()
+        pickcode = "12345678901234567"
+        item = {
+            "pick_code": pickcode, "file_name": "test.bin", "file_size": 5,
+            "url": {"url": "https://example.com/test.bin"},
+        }
+        item[field] = value
+        client.file._api.post_encrypted.return_value.json.return_value = {"200": item}
+        with pytest.raises(OSError, match="download response"):
+            client.file.url(pickcode)
+        client.file._api.get.assert_not_called()
 
     def test_url_returns_valid_object(self, api_client, shared):
         info = api_client.file.url(shared.file_large.path)

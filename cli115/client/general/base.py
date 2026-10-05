@@ -58,6 +58,7 @@ class APIClient(httpx.Client):
         resp = self.post(url, **kwargs)
         raw_json = rsa_decrypt(resp.json()["data"])
         resp._content = raw_json
+        self._check_response(resp)
         return resp
 
     def send(self, request: httpx.Request, *args, **kwargs):
@@ -78,7 +79,10 @@ class APIClient(httpx.Client):
     def _check_response(self, resp: httpx.Response):
         try:
             data = resp.json()
-        except Exception:
+        except (ValueError, httpx.ResponseNotRead):
+            return
+
+        if not isinstance(data, dict):
             return
 
         state = data.get("state")
@@ -86,7 +90,11 @@ class APIClient(httpx.Client):
             return
 
         errno = data.get("errno") or data.get("errNo") or data.get("code") or 0
-        if not errno:
+        try:
+            errno = int(errno)
+        except (TypeError, ValueError):
+            pass
+        if not errno and state not in (False, 0):
             return
 
         message = (

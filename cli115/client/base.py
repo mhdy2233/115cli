@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from os import PathLike
+import re
 from typing import BinaryIO, Sequence
 
 import httpx
@@ -220,6 +221,7 @@ class FileClient(ABC):
         *,
         sort: SortField = SortField.FILENAME,
         sort_order: SortOrder = SortOrder.ASC,
+        page_size: int = DEFAULT_PAGE_SIZE,
     ) -> Sequence[Directory | File]:
         """Return a lazy collection of directory entries.
 
@@ -230,6 +232,7 @@ class FileClient(ABC):
             path: Directory path or :class:`Directory` object. ``"/"`` for root.
             sort: Sort field.
             sort_order: :attr:`SortOrder.ASC` or :attr:`SortOrder.DESC`.
+            page_size: Items requested per page, capped at :data:`MAX_PAGE_SIZE`.
 
         Returns:
             A :class:`~cli115.helpers.LazyCollection` of directory entries.
@@ -239,6 +242,9 @@ class FileClient(ABC):
             NotADirectoryError: If the specified path is not a directory.
         """
 
+        if page_size < 1:
+            raise ValueError("page size must be greater than zero")
+        page_size = min(page_size, MAX_PAGE_SIZE)
         if not isinstance(path, Directory):
             # eagerly resolve the path to validate its existence
             path = self.stat(path)
@@ -256,7 +262,7 @@ class FileClient(ABC):
                 offset=(page - 1) * page_size,
             )
 
-        return LazyCollection(fetch, page_size=DEFAULT_PAGE_SIZE)
+        return LazyCollection(fetch, page_size=page_size)
 
     @abstractmethod
     def _list(
@@ -664,6 +670,12 @@ class ShareClient(ABC):
         def fetch(
             page: int, page_size: int
         ) -> tuple[list[ShareDirectory | ShareFile], Pagination]:
+            nonlocal path
+            if not isinstance(path, ShareDirectory):
+                entry = self.stat(share_code, path, password=password)
+                if not entry.is_directory:
+                    raise NotADirectoryError(f"not a directory: {path}")
+                path = entry
             return self._list(
                 share_code,
                 password=password,
@@ -809,8 +821,8 @@ class RemoteFile:
 
     By default, Range headers are used for partial reads.  Call
     :meth:`set_stream` to switch to httpx streaming mode, which reads the
-    file sequentially via :meth:`httpx.Response.iter_bytes` without using
-    Range headers.
+    file sequentially via :meth:`httpx.Response.iter_bytes`. Resuming from
+    a nonzero position uses a Range header.
     """
 
     def __init__(self, info: DownloadUrl) -> None:
@@ -822,6 +834,7 @@ class RemoteFile:
         self._stream_context = None
         self._stream_resp = None
         self._stream_iter = None
+        self._stream_buffer = bytearray()
 
     # -- helpers --
 
@@ -840,11 +853,31 @@ class RemoteFile:
     def _ensure_stream(self):
         if self._stream_context is None:
             client = self._ensure_client()
-            self._stream_context = client.stream("GET", self._info.url)
-            resp = self._stream_context.__enter__()
-            resp.raise_for_status()
+            kwargs = {"headers": {"Range": f"bytes={self._pos}-"}} if self._pos else {}
+            context = client.stream("GET", self._info.url, **kwargs)
+            resp = context.__enter__()
+            self._stream_context = context
+            try:
+                resp.raise_for_status()
+                self._check_range(resp, self._pos, self._size - 1)
+            except BaseException:
+                self._close_stream()
+                raise
             self._stream_resp = resp
         return self._stream_resp
+
+    def _check_range(self, resp: httpx.Response, start: int, end: int) -> None:
+        if resp.status_code == 200 and start == 0 and end == self._size - 1:
+            return
+        match = re.fullmatch(
+            r"bytes (\d+)-(\d+)/(\d+|\*)", resp.headers.get("Content-Range", "")
+        )
+        if (
+            resp.status_code != 206 or match is None
+            or int(match[1]) != start or int(match[2]) != end
+            or (match[3] != "*" and int(match[3]) != self._size)
+        ):
+            raise OSError("server did not return the requested byte range")
 
     def _close_stream(self) -> None:
         if self._stream_context is not None:
@@ -852,6 +885,7 @@ class RemoteFile:
             self._stream_context = None
             self._stream_resp = None
             self._stream_iter = None
+            self._stream_buffer.clear()
 
     # -- stream flag --
 
@@ -890,36 +924,49 @@ class RemoteFile:
 
     def seek(self, offset: int, whence: int = 0) -> int:
         if whence == 0:
-            self._pos = offset
+            pos = offset
         elif whence == 1:
-            self._pos += offset
+            pos = self._pos + offset
         elif whence == 2:
-            self._pos = self._size + offset
+            pos = self._size + offset
         else:
             raise ValueError(f"invalid whence: {whence}")
-        self._pos = max(0, min(self._pos, self._size))
+        if pos < 0:
+            raise ValueError("negative seek position")
+        if pos != self._pos:
+            self._close_stream()
+        self._pos = pos
         return self._pos
 
     def read(self, size: int = -1) -> bytes:
-        if self._pos >= self._size:
+        if size == 0 or self._pos >= self._size:
             return b""
+        size = self._size - self._pos if size < 0 else min(size, self._size - self._pos)
         if self._stream:
             resp = self._ensure_stream()
             if self._stream_iter is None:
-                self._stream_iter = resp.iter_bytes(size if size > 0 else None)
-            data = next(self._stream_iter, b"")
+                self._stream_iter = resp.iter_bytes(64 * 1024)
+            while len(self._stream_buffer) < size:
+                chunk = next(self._stream_iter, b"")
+                if not chunk:
+                    raise OSError("unexpected end of remote file")
+                self._stream_buffer.extend(chunk)
+                if self._pos + len(self._stream_buffer) > self._size:
+                    raise OSError("remote file exceeds expected size")
+            data = bytes(self._stream_buffer[:size])
+            del self._stream_buffer[:size]
             self._pos += len(data)
             return data
         client = self._ensure_client()
         start = self._pos
-        if size < 0:
-            end = self._size - 1
-        else:
-            end = min(start + size - 1, self._size - 1)
+        end = start + size - 1
         headers = {"Range": f"bytes={start}-{end}"}
-        resp = client.get(self._info.url, headers=headers)
-        resp.raise_for_status()
-        data = resp.content
+        with client.stream("GET", self._info.url, headers=headers) as resp:
+            resp.raise_for_status()
+            self._check_range(resp, start, end)
+            data = resp.read()
+        if len(data) != size:
+            raise OSError("unexpected length of remote file response")
         self._pos += len(data)
         return data
 

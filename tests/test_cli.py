@@ -1,12 +1,13 @@
 import argparse
 import pytest
+from httpx import ConnectError
 from unittest.mock import MagicMock, patch
 
 from cli115.cli import build_parser, load_config, main, DEFAULT_CREDENTIALS_DIR
 from cli115.client.general import DEFAULT_USER_AGENT
 from cli115.cmds.ls import LsCommand
 from cli115.credentials import CredentialManager
-from cli115.exceptions import CommandLineError
+from cli115.exceptions import CommandLineError, WAFBlockedError
 from tests.helpers import make_lazy
 
 
@@ -81,6 +82,17 @@ class TestBuildParser:
 
 
 class TestMainEntryPoint:
+    @pytest.mark.parametrize("error", [
+        ConnectError("connection failed"), WAFBlockedError("blocked"),
+    ])
+    def test_expected_network_error_caught(self, error, capsys):
+        with patch.object(LsCommand, "execute", side_effect=error):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["ls", "/"])
+
+        assert exc_info.value.code == 1
+        assert str(error) in capsys.readouterr().err
+
     @patch.object(LsCommand, "_create_client")
     def test_dispatch_to_command(self, mock_create):
         mock_client = MagicMock()

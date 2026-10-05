@@ -57,6 +57,10 @@ After [authenticating](#authentication) with `115cli login`, you can use the `11
 115cli fetch --id 1234567 -o /local/save/path.mp4
 # Download a folder recursively, with integrity check
 115cli fetch /path/to/dir/ -o /local/save/dir/ --check-integrity
+# Download up to 4 files at once
+115cli fetch /path/to/dir/ -o /local/save/dir/ -j 4 --check-integrity
+# Skip existing local destination files by name, regardless of size or content
+115cli fetch /path/to/dir/ -o /local/save/dir/ -T -j 4 --dedup-by-name
 # Download with include/exclude patterns
 115cli fetch /path/to/dir/ -o /local/save/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
 
@@ -70,6 +74,8 @@ After [authenticating](#authentication) with `115cli login`, you can use the `11
 115cli upload /local/folder/ /remote/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
 # Upload multiple files concurrently with custom part size
 115cli upload /local/folder/ /remote/dir/ -j 4 --part-size 32M
+# Use one exported remote tree to skip matching relative paths by name only
+115cli upload /local/folder/ /remote/dir/ -T -j 4 --dedup-by-name
 # Enable verbose debug logging
 115cli upload /local/folder/ /remote/dir/ --debug
 
@@ -102,6 +108,36 @@ After [authenticating](#authentication) with `115cli login`, you can use the `11
 ```
 
 > **Note:** Creating cloud download tasks may trigger a captcha challenge. This is currently not supported by the client.
+
+For uploads and downloads, `-j N` controls the number of files transferred at once
+(default: 1). Configure defaults with `upload.max_workers` and
+`download.max_workers`. By default, existing files are skipped only when both size and SHA-1
+match. Uploads reject conflicting names or content; downloads replace different
+local content only after a successful transfer.
+
+Progress and success/skipped/failed summaries go to stderr. Terminals show an
+overall bar and active file bars; redirected output gets a summary only.
+`--silent` suppresses progress and summaries, and upload `--format json` keeps
+stdout valid JSON.
+
+For directory uploads, `--dedup-by-name` obtains one server-side directory tree
+and matches complete relative paths in memory, without per-directory metadata
+listings or size/SHA-1 comparisons. Only parents needed by new uploads are
+resolved or created. Exporting still requires submission, polling and fetching
+the text, and creates an export text file in the remote target; small directories
+may use more requests. This mode skips changed content at matching paths, and
+the text cannot reliably distinguish leaf files from empty directories. The
+default size/SHA-1 mode retains type and content checks.
+
+`fetch --dedup-by-name` skips existing local destination files without reading
+their size or hash; remote metadata/listing requests remain necessary.
+`--check-integrity` then checks only newly downloaded files, not skipped files.
+
+Full directory scans (metadata-based upload deduplication, recursive downloads,
+and local tree exports) request up to 1150 items per page; ordinary `ls` keeps
+its 200-item page size. Pagination follows any smaller limit returned by the
+server. Searches and share listings reuse resolved directory IDs within each
+operation, and single-file uploads reuse their preflight check and parent ID.
 
 #### Authentication
 

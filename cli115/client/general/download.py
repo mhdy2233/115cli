@@ -68,7 +68,7 @@ class DownloadClient(BaseDownloadClient, BaseClient):
         data = resp.json()
         result = data["result"]
         hashes = [r.get("info_hash", "") for r in result]
-        tasks_map = self._fetch_tasks_map()
+        tasks_map = self._fetch_tasks_map(set(hashes))
         return [tasks_map[h] for h in hashes if h in tasks_map]
 
     def delete(self, *task_hashes: str) -> None:
@@ -100,9 +100,16 @@ class DownloadClient(BaseDownloadClient, BaseClient):
             data={"info_hash": info_hash},
         )
 
-    def _fetch_tasks_map(self) -> dict[str, CloudTask]:
-        tasks, _ = self._list(page=1)
-        return {t.info_hash: t for t in tasks}
+    def _fetch_tasks_map(self, hashes: set[str]) -> dict[str, CloudTask]:
+        tasks = {}
+        if not hashes:
+            return tasks
+        for task in self.list():
+            if task.info_hash in hashes:
+                tasks[task.info_hash] = task
+                if len(tasks) == len(hashes):
+                    break
+        return tasks
 
     def _parse_task(self, task: dict) -> CloudTask:
         return CloudTask(

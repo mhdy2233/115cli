@@ -108,6 +108,25 @@ class TestInstantUpload:
             # _INSTANT_CONTENT is 4 MB; a 4 MB threshold forces instant-only mode
             mock_client.file.upload("/remote/f.bin", file, instant_only=4 * 1024 * 1024)
 
+    @pytest.mark.parametrize(
+        "lookup_error",
+        [OSError("network failure"), FileNotFoundError("not yet visible")],
+    )
+    def test_successful_instant_upload_does_not_retry_after_lookup_failure(
+        self, mock_client, lookup_error
+    ):
+        mock_client.file.stat.side_effect = [FileNotFoundError(), lookup_error]
+        status = UploadStatus()
+        with pytest.raises(type(lookup_error), match=str(lookup_error)):
+            mock_client.file.upload(
+                "/remote/f.bin", io.BytesIO(self._INSTANT_CONTENT), status=status
+            )
+        mock_client.file._uploader.instant_upload.assert_called_once()
+        mock_client.file._uploader.simple_upload.assert_not_called()
+        assert status.is_instant_uploaded is True
+        assert status.is_completed
+        assert status.instant_upload_error is None
+
     def test_small_file_skips_instant_upload(self, mock_client):
         file = io.BytesIO(b"small content")
         mock_client.file._uploader.simple_upload.return_value = (

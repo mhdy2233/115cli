@@ -50,6 +50,17 @@ class TestCurrentCredential:
 
 
 class TestLogin:
+    def test_failed_switch_preserves_active_user(self, tmp_path):
+        cm = _make_cm(tmp_path)
+        cm.save_credential("user1", CredType.COOKIE, COOKIE_VALUES)
+        cm.login("user1")
+
+        with pytest.raises(CredentialError):
+            cm.login("missing", CredType.COOKIE)
+
+        assert cm.current_user == "user1"
+        assert cm.current_credential == (CredType.COOKIE, COOKIE_VALUES)
+
     def test_login(self, tmp_path):
         cm = _make_cm(tmp_path)
         cm.save_credential("user1", CredType.COOKIE, COOKIE_VALUES)

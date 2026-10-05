@@ -166,7 +166,7 @@ class TestFetchCommand:
     def test_fetch_check_integrity_passes(self, mock_create, mock_sha1):
         file = _make_file(name="remote.bin", size=1024)
         mock_create.return_value = self._make_client_mock(file=file)
-        mock_sha1.return_value = (file.sha1, file.size)
+        mock_sha1.return_value = (file.sha1.upper(), file.size)
 
         parser, cmds = make_parser()
         args = parser.parse_args(
@@ -189,7 +189,7 @@ class TestFetchCommand:
         cfg["download"]["check_integrity"] = "true"
         file = _make_file(name="remote.bin", size=1024)
         mock_create.return_value = self._make_client_mock(file=file)
-        mock_sha1.return_value = (file.sha1, file.size)
+        mock_sha1.return_value = (file.sha1.upper(), file.size)
 
         parser, cmds = build_parser(cfg, CredentialManager(cfg))
         args = parser.parse_args(["fetch", "/remote/remote.bin", "--silent"])
@@ -230,6 +230,7 @@ class TestFetchCommand:
     def test_fetch_check_integrity_failed(self, mock_create, mock_sha1):
         file = _make_file(name="remote.bin", size=1024)
         mock_create.return_value = self._make_client_mock(file=file)
+        mock_create.return_value.file.open.return_value.read.side_effect = [b"x" * 512, b""]
         mock_sha1.return_value = (file.sha1, 512)
         parser, cmds = make_parser()
         args = parser.parse_args(
@@ -279,6 +280,32 @@ class TestFetchCommand:
                 assert not os.path.exists("remote.bin")
             finally:
                 os.chdir(orig_dir)
+
+    @patch.object(FetchCommand, "_create_client")
+    def test_fetch_directory_failure_raises_instead_of_reporting_saved(
+        self, mock_create, tmp_path, capsys
+    ):
+        client = MagicMock()
+        client.file.stat.return_value = _make_dir()
+        client.file.list.return_value = [_make_file()]
+        client.file.open.side_effect = OSError("download failed")
+        mock_create.return_value = client
+        parser, cmds = make_parser()
+        args = parser.parse_args(["fetch", "/remote", "-o", str(tmp_path), "--silent"])
+        with pytest.raises(CommandLineError, match="1 file\\(s\\) failed"):
+            cmds["fetch"].execute(args)
+        output = capsys.readouterr()
+        assert "download failed" in output.err
+        assert "Saved to" not in output.out
+
+    @patch.object(FetchCommand, "_create_client")
+    def test_fetch_rejects_unsafe_default_name(self, mock_create, tmp_path):
+        mock_create.return_value = self._make_client_mock(file=_make_file(name="../outside"))
+        parser, cmds = make_parser()
+        args = parser.parse_args(["fetch", "/remote", "-o", str(tmp_path), "--silent"])
+        with pytest.raises(ValueError, match="invalid local filename"):
+            cmds["fetch"].execute(args)
+        mock_create.return_value.file.open.assert_not_called()
 
     @patch("cli115.cmds.fetch.Fetcher.fetch")
     @patch.object(FetchCommand, "_create_client")
@@ -798,7 +825,8 @@ class TestUploadCommand:
         cmds["upload"].execute(args)
 
         mock_uploader_cls.assert_called_once_with(
-            mock_client, dry_run=True, part_size=16 * 1024 * 1024, max_workers=1
+            mock_client, dry_run=True, part_size=16 * 1024 * 1024,
+            max_workers=1, dedup_by_name=False,
         )
 
     @patch("cli115.cmds.upload.Uploader")
@@ -825,7 +853,8 @@ class TestUploadCommand:
         cmds["upload"].execute(args)
 
         mock_uploader_cls.assert_called_once_with(
-            mock_client, dry_run=False, part_size=32 * 1024 * 1024, max_workers=4
+            mock_client, dry_run=False, part_size=32 * 1024 * 1024,
+            max_workers=4, dedup_by_name=False,
         )
     @patch.object(UploadCommand, "_create_client")
     def test_plan_flag_shows_plan(self, mock_create, tmp_path, capsys):
@@ -833,7 +862,8 @@ class TestUploadCommand:
         local_file.write_text("content")
 
         mock_client = MagicMock()
-        mock_client.file.stat.side_effect = FileNotFoundError("not found")
+        mock_client.file._resolve_dir_id.return_value = "100"
+        mock_client.file.list.return_value = []
         mock_client.file.upload.return_value = None
         mock_create.return_value = mock_client
 
@@ -843,9 +873,10 @@ class TestUploadCommand:
         )
         cmds["upload"].execute(args)
 
-        output = capsys.readouterr().out
-        assert str(local_file) in output
-        assert "/remote/file.txt" in output
+        output = capsys.readouterr()
+        assert output.out == ""
+        assert str(local_file) in output.err
+        assert "/remote/file.txt" in output.err
 
     @patch.object(UploadCommand, "_create_client")
     def test_dry_run_flag_shows_plan(self, mock_create, tmp_path, capsys):
@@ -853,7 +884,8 @@ class TestUploadCommand:
         local_file.write_text("content")
 
         mock_client = MagicMock()
-        mock_client.file.stat.side_effect = FileNotFoundError("not found")
+        mock_client.file._resolve_dir_id.return_value = "100"
+        mock_client.file.list.return_value = []
         mock_create.return_value = mock_client
 
         parser, cmds = make_parser()
@@ -862,9 +894,11 @@ class TestUploadCommand:
         )
         cmds["upload"].execute(args)
 
-        output = capsys.readouterr().out
-        assert str(local_file) in output
-        assert "/remote/file.txt" in output
+        output = capsys.readouterr()
+        assert output.out == ""
+        assert str(local_file) in output.err
+        assert "/remote/file.txt" in output.err
+        assert "dry run, no files transferred" in output.err
 
     @patch("cli115.cmds.upload.Uploader")
     @patch.object(UploadCommand, "_create_client")
@@ -884,12 +918,111 @@ class TestUploadCommand:
 
         parser, cmds = make_parser()
         args = parser.parse_args(["upload", "-s", "/local/dir", "/remote/dir"])
-        cmds["upload"].execute(args)
+        with pytest.raises(CommandLineError, match="2 file\\(s\\) failed"):
+            cmds["upload"].execute(args)
 
         stderr = capsys.readouterr().err
         assert "2 file(s) failed to upload" in stderr
         assert "/local/a.txt -> /remote/a.txt: network timeout" in stderr
         assert "/local/b.txt -> /remote/b.txt: checksum mismatch" in stderr
+
+
+class TestTransferCommandOutput:
+    @pytest.mark.parametrize("command", ["upload", "fetch"])
+    def test_preflight_conflict_reports_aborted(self, command, tmp_path, capsys):
+        local = tmp_path / "file.txt"
+        local.write_bytes(b"content")
+        parser, cmds = make_parser()
+        paths = [str(local), "/remote"] if command == "upload" else ["/remote", "-o", str(local)]
+        args = parser.parse_args([command, *paths])
+        with patch.object(cmds[command], "_create_client") as create:
+            client = create.return_value
+            if command == "upload":
+                client.file._resolve_dir_id.return_value = "0"
+                client.file.list.return_value = [_make_file(name="remote", size=8)]
+            else:
+                client.file.stat.return_value = _make_dir()
+            with pytest.raises(FileExistsError):
+                cmds[command].execute(args)
+            client.file.upload.assert_not_called()
+            client.file.open.assert_not_called()
+        output = capsys.readouterr()
+        assert output.out == ""
+        assert output.err == f"{command.title()} aborted before transfer\n"
+
+    @pytest.mark.parametrize("flags", [[], ["--plan"], ["--silent"]])
+    @patch.object(UploadCommand, "_create_client")
+    def test_upload_json_is_not_polluted(self, mock_create, flags, tmp_path, capsys):
+        local = tmp_path / "file.txt"
+        local.write_bytes(b"content")
+        client = mock_create.return_value
+        client.file._resolve_dir_id.return_value = "100"
+        client.file.list.return_value = []
+        client.file.upload.return_value = _make_file(size=7)
+        parser, cmds = make_parser()
+        args = parser.parse_args([
+            "upload", "--format", "json", *flags, str(local), "/remote/file.txt",
+        ])
+        cmds["upload"].execute(args)
+        output = capsys.readouterr()
+        assert json.loads(output.out)["Size"] == 7
+        assert "\x1b" not in output.err and "\r" not in output.err
+        if "--silent" in flags:
+            assert output.err == ""
+        else:
+            assert "1 / 1 files, 0 failed" in output.err
+
+    @pytest.mark.parametrize("flags", [[], ["--plan"], ["--silent"]])
+    @patch.object(FetchCommand, "_create_client")
+    def test_fetch_stdout_only_has_saved_path(self, mock_create, flags, tmp_path, capsys):
+        client = mock_create.return_value
+        client.file.stat.return_value = _make_file(size=1024)
+        client.file.open.return_value = _make_remote_file_mock()
+        destination = tmp_path / "file.txt"
+        parser, cmds = make_parser()
+        args = parser.parse_args(["fetch", *flags, "/remote/file.txt", "-o", str(destination)])
+        cmds["fetch"].execute(args)
+        output = capsys.readouterr()
+        assert output.out == f"Saved to {destination}\n"
+        assert "\x1b" not in output.err and "\r" not in output.err
+        if "--silent" in flags:
+            assert output.err == ""
+        else:
+            assert "1 / 1 files, 0 failed" in output.err
+
+    @pytest.mark.parametrize("command", ["upload", "fetch"])
+    @pytest.mark.parametrize("workers", ["0", "-1"])
+    @pytest.mark.parametrize("from_config", [False, True])
+    def test_non_positive_worker_count_rejected(self, command, workers, from_config):
+        cfg = load_config()
+        if from_config:
+            cfg["upload" if command == "upload" else "download"]["max_workers"] = workers
+        parser, cmds = build_parser(cfg, CredentialManager(cfg))
+        paths = ["local", "/remote"] if command == "upload" else ["/remote"]
+        args = parser.parse_args([command, *paths, *([] if from_config else ["-j", workers])])
+        with patch.object(cmds[command], "_create_client") as create:
+            with pytest.raises(CommandLineError, match="max workers must be greater than zero"):
+                cmds[command].execute(args)
+            create.assert_not_called()
+
+    @pytest.mark.parametrize("flag", ["-j", "--threads", "--max-workers"])
+    @patch("cli115.cmds.fetch.Fetcher.fetch")
+    @patch.object(FetchCommand, "_create_client")
+    def test_fetch_worker_count_config_and_override(self, mock_create, mock_fetch, flag):
+        mock_create.return_value.file.stat.return_value = _make_file()
+        mock_fetch.return_value = None
+        cfg = load_config()
+        cfg["download"].pop("max_workers", None)
+        parser, cmds = build_parser(cfg, CredentialManager(cfg))
+        args = parser.parse_args(["fetch", "/remote", "--silent"])
+        cmds["fetch"].execute(args)
+        assert cmds["fetch"].fetcher.max_workers == 1
+        cfg["download"]["max_workers"] = "3"
+        cmds["fetch"].execute(args)
+        assert cmds["fetch"].fetcher.max_workers == 3
+        args = parser.parse_args(["fetch", "/remote", "--silent", flag, "2"])
+        cmds["fetch"].execute(args)
+        assert cmds["fetch"].fetcher.max_workers == 2
 
 
 class TestUrlCommand:
@@ -958,7 +1091,7 @@ class TestExportCommand:
     @patch.object(ExportCommand, "_create_client")
     def test_export_command_writes_file(self, mock_create, tmp_path):
         mock_client = MagicMock()
-        target_dir = _make_dir(name="testfolder", path="/testfolder", id="111")
+        target_dir = _make_dir(name="testfolder", id="111")
         mock_client.file.stat.return_value = target_dir
         mock_client.file.export_dir.return_value = {
             "file_name": "testfolder_目录树.txt",
@@ -968,8 +1101,100 @@ class TestExportCommand:
 
         parser, cmds = make_parser()
         out_file = tmp_path / "custom_tree.txt"
-        args = parser.parse_args(["export", "/testfolder", "-o", str(out_file)])
+        args = parser.parse_args(["export", "/testfolder", "--server", "-o", str(out_file)])
         cmds["export"].execute(args)
 
         assert out_file.exists()
         assert "file1.mp4" in out_file.read_text(encoding="utf-8")
+
+    @patch.object(ExportCommand, "_create_client")
+    def test_export_directory_failure_preserves_output(self, mock_create, tmp_path):
+        mock_client = MagicMock()
+        mock_client.file.stat.return_value = _make_dir()
+        mock_client.file.list.side_effect = OSError("directory listing failed")
+        mock_create.return_value = mock_client
+        out_file = tmp_path / "tree.txt"
+        out_file.write_text("existing tree", encoding="utf-8")
+
+        parser, cmds = make_parser()
+        args = parser.parse_args(["export", "/testfolder", "-o", str(out_file)])
+        with pytest.raises(OSError, match="directory listing failed"):
+            cmds["export"].execute(args)
+        assert out_file.read_text(encoding="utf-8") == "existing tree"
+
+
+class TestNameOnlyDeduplication:
+    @patch.object(FetchCommand, "_create_client")
+    def test_directory_fetch_by_id_skips_existing_name(self, create, tmp_path, capsys):
+        destination = tmp_path / "probe.txt"
+        destination.write_bytes(b"existing local content")
+        root = _make_dir(id="100")
+        client = create.return_value
+        client.file.id.return_value = root
+        client.file.list.return_value = [_make_file("probe.txt", size=999)]
+        parser, commands = make_parser()
+        args = parser.parse_args([
+            "fetch", "--id", "100", "-o", str(tmp_path), "-T", "-j", "3",
+            "--dedup-by-name",
+        ])
+
+        with patch("cli115.fetcher.sha1_file", side_effect=AssertionError):
+            commands["fetch"].execute(args)
+
+        assert destination.read_bytes() == b"existing local content"
+        assert "1 skipped" in capsys.readouterr().err
+        client.file.list.assert_called_once_with(root, page_size=1150)
+        client.file.open.assert_not_called()
+
+    @patch.object(UploadCommand, "_create_client")
+    def test_upload_directory_uses_exported_names(self, create, tmp_path, capsys):
+        (tmp_path / "probe.txt").write_bytes(b"changed local content")
+        client = create.return_value
+        client.file._resolve_dir_id.return_value = "100"
+        client.file.export_dir.return_value = {
+            "content": "|——根目录\n| |-dest\n| | |-probe.txt\n"
+        }
+        parser, commands = make_parser()
+        args = parser.parse_args([
+            "upload", str(tmp_path), "/dest", "-T", "-j", "3",
+            "--dedup-by-name", "--format", "json",
+        ])
+
+        with patch("cli115.uploader.sha1_file", side_effect=AssertionError):
+            commands["upload"].execute(args)
+
+        output = capsys.readouterr()
+        assert json.loads(output.out)["ID"] == "100"
+        assert "1 skipped" in output.err
+        client.file.export_dir.assert_called_once()
+        client.file.list.assert_not_called()
+        client.file.upload.assert_not_called()
+        client.file.create_directory.assert_not_called()
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    @patch.object(FetchCommand, "_create_client")
+    def test_fetch_skips_existing_name_without_hash(
+        self, create, dry_run, tmp_path, capsys
+    ):
+        output = tmp_path / "probe.txt"
+        output.write_bytes(b"different local content")
+        create.return_value.file.stat.return_value = _make_file("probe.txt", size=99)
+        parser, commands = make_parser()
+        argv = [
+            "fetch", "/probe.txt", "-o", str(output),
+            "--dedup-by-name", "--check-integrity",
+        ]
+        if dry_run:
+            argv.append("--dry-run")
+
+        with patch("cli115.fetcher.sha1_file", side_effect=AssertionError):
+            commands["fetch"].execute(parser.parse_args(argv))
+
+        assert output.read_bytes() == b"different local content"
+        assert "1 skipped" in capsys.readouterr().err
+        create.return_value.file.open.assert_not_called()
+
+    def test_content_comparison_remains_the_default(self):
+        parser, _ = make_parser()
+        assert not parser.parse_args(["upload", "local", "/remote"]).dedup_by_name
+        assert not parser.parse_args(["fetch", "/remote"]).dedup_by_name

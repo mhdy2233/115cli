@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from cli115.client.base import MAX_PAGE_SIZE
 from cli115.cmds.base import BaseCommand
 from cli115.exceptions import CommandLineError
 from cli115.helpers import format_size
@@ -24,10 +25,7 @@ def build_tree_text(
 
     def _walk(current_dir, prefix: str = "") -> None:
         nonlocal dir_count, file_count
-        try:
-            items = list(client.file.list(current_dir))
-        except Exception:
-            return
+        items = list(client.file.list(current_dir, page_size=MAX_PAGE_SIZE))
 
         dirs = [item for item in items if item.is_directory]
         files = [item for item in items if not item.is_directory]

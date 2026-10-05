@@ -6,6 +6,8 @@ from configparser import ConfigParser
 from pathlib import Path
 import sys
 
+from httpx import HTTPError
+
 from cli115.__version__ import __version__
 from cli115.client.general import DEFAULT_USER_AGENT
 from cli115.credentials import CredentialManager
@@ -33,7 +35,9 @@ from cli115.cmds.transcode import TranscodeCommand
 from cli115.cmds.upload import UploadCommand
 from cli115.cmds.stream import StreamCommand
 from cli115.cmds.url import UrlCommand
-from cli115.exceptions import APIError, CommandLineError, CredentialError
+from cli115.exceptions import (
+    APIError, CommandLineError, CredentialError, WAFBlockedError,
+)
 
 COMMANDS = OrderedDict(
     [
@@ -87,6 +91,8 @@ def load_config() -> ConfigParser:
         config["download"]["max_connection"] = "2"
     if "check_integrity" not in config["download"]:
         config["download"]["check_integrity"] = "false"
+    if "max_workers" not in config["download"]:
+        config["download"]["max_workers"] = "1"
     if "upload" not in config:
         config["upload"] = {}
     if "part_size" not in config["upload"]:
@@ -153,7 +159,9 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         cmd.execute(args)
-    except (APIError, CommandLineError, CredentialError, OSError) as e:
+    except (
+        APIError, CommandLineError, CredentialError, OSError, HTTPError, WAFBlockedError,
+    ) as e:
         typ = type(e).__name__
         if isinstance(e, CommandLineError):
             typ = "Error"

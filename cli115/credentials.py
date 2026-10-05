@@ -30,7 +30,7 @@ class CredentialManager:
     def current_user(self) -> str:
         """Return ``uid`` for the active user.
 
-        Raises ``FileNotFoundError`` if no user is currently logged in.
+        Raises ``CredentialError`` if no user is currently logged in.
         """
         current_file = self.credentials_dir / CURRENT_CREDENTIAL_FILE
         if not current_file.exists():
@@ -47,15 +47,14 @@ class CredentialManager:
         """Record which user and credential type are currently active."""
         cred_dir = self.credentials_dir
         cred_dir.mkdir(parents=True, exist_ok=True)
-        (cred_dir / CURRENT_CREDENTIAL_FILE).write_text(uid)
+        cred_type, _ = self.get_credential(uid, cred_type)
         cred_path = cred_dir / f"{uid}.json"
         with open(cred_path, "r") as f:
             stored = json.load(f)
-        if not cred_type:
-            cred_type = _get_credential_type(stored, uid)
         stored["type"] = cred_type
         with open(cred_path, "w") as f:
             json.dump(stored, f, indent=2)
+        (cred_dir / CURRENT_CREDENTIAL_FILE).write_text(uid)
 
     def logout(self) -> None:
         """Clear the active user pointer without deleting stored credentials."""
@@ -74,7 +73,7 @@ class CredentialManager:
             credentials = json.load(f)
         if cred_type is None:
             cred_type = _get_credential_type(credentials, uid)
-        elif cred_type not in credentials:
+        if cred_type not in credentials:
             raise CredentialError(
                 f"no '{cred_type}' credentials found for user '{uid}'"
             )

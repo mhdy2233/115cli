@@ -246,7 +246,7 @@ class TestShareSaveCommand:
         mock_client.share.list.assert_called_once_with(
             "swzadyu3zs9",
             password="azhy",
-            path="/docs",
+            path=mock_client.share.stat.return_value,
         )
         mock_client.share.save.assert_called_once_with(
             "swzadyu3zs9",

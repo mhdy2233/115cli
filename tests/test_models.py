@@ -171,9 +171,21 @@ class TestUploadStatus:
 
         with s.start_upload(500) as progress:
             progress.update(500)
+            assert not s.is_completed
 
         assert s.is_completed
         receiver.assert_called_once_with(s)
+
+    def test_callback_failure_after_read_does_not_mark_completed(self):
+        s = UploadStatus()
+        receiver = MagicMock()
+        s.on_complete.connect(receiver)
+        with pytest.raises(RuntimeError, match="callback failed"):
+            with s.start_upload(500) as progress:
+                progress.update(500)
+                raise RuntimeError("callback failed")
+        assert not s.is_completed
+        receiver.assert_not_called()
 
     def test_on_complete_emitted_once(self):
         s = UploadStatus()

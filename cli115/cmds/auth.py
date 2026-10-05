@@ -55,7 +55,7 @@ class AuthCookieCommand(BaseCommand):
 
     def _validate_cookies(self, cookies: dict[str, str]) -> None:
         required = {"UID", "CID", "SEID", "KID"}
-        missing = required - set(cookies.keys())
+        missing = {key for key in required if not cookies.get(key, "").strip()}
         if missing:
             raise CommandLineError(
                 f"missing required cookies: {', '.join(sorted(missing))}"

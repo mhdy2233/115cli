@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import BinaryIO
+from typing import BinaryIO, Sequence
 from cli115.client.base import (
     DEFAULT_PAGE_SIZE,
     FileClient as BaseFileClient,
@@ -11,7 +11,7 @@ from cli115.client.base import (
     MIN_INSTANT_UPLOAD_SIZE,
     RemoteFile,
 )
-from cli115.client.lazy import new_lazy_cls
+from cli115.client.lazy import LazyPathCollection, new_lazy_cls
 from cli115.client.models import (
     Directory,
     DownloadUrl,
@@ -114,6 +114,29 @@ class FileClient(BaseFileClient, BaseClient):
         )
         return items, pagination
 
+    def find(
+        self,
+        query: str,
+        *,
+        path: str | Directory | None = None,
+    ) -> Sequence[Directory | File]:
+        dir_id = None
+
+        def fetch(
+            page: int, page_size: int
+        ) -> tuple[list[Directory | File], Pagination]:
+            nonlocal dir_id
+            if dir_id is None:
+                dir_id = self._resolve_dir_id(path) if path is not None else "0"
+            return self._find(
+                query,
+                dir_id=dir_id,
+                limit=page_size,
+                offset=(page - 1) * page_size,
+            )
+
+        return LazyPathCollection(fetch, page_size=DEFAULT_PAGE_SIZE)
+
     def _find(
         self,
         query: str,
@@ -121,16 +144,17 @@ class FileClient(BaseFileClient, BaseClient):
         path: str | Directory | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
+        dir_id: str | None = None,
     ) -> tuple[list[Directory | File], Pagination]:
         payload: dict = {
             "search_value": query,
             "offset": offset,
             "limit": min(limit, MAX_PAGE_SIZE),
             "aid": 1,  # normal files
-            "cid": "0",
+            "cid": dir_id if dir_id is not None else "0",
             "show_dir": 1,
         }
-        if path is not None:
+        if dir_id is None and path is not None:
             payload["cid"] = self._resolve_dir_id(path)
 
         resp = self._api.get(
@@ -194,25 +218,21 @@ class FileClient(BaseFileClient, BaseClient):
         )
 
     def delete(self, path: str | FileSystemEntry, *, recursive: bool = False) -> None:
-        entry = self.stat(path)
-        if not recursive and entry.is_directory:
-            items = self.list(path)
-            if len(items) > 0:
-                raise FileExistsError(f"directory is not empty: {path}")
-        self._api.post(
-            Endpoint.WEBAPI + "/rb/delete",
-            data={"fid": entry.id},
-        )
+        self.batch_delete(path, recursive=recursive)
 
     def batch_delete(
         self, *paths: str | FileSystemEntry, recursive: bool = False
     ) -> None:
-        if recursive:
-            raise NotImplementedError("recursive batch delete is not yet supported")
-        ids = [self._resolve_id(p) for p in paths]
+        if not paths:
+            raise ValueError("no paths specified")
+        entries = [self.stat(path) for path in paths]
+        if not recursive:
+            for entry in entries:
+                if entry.is_directory and len(self.list(entry)):
+                    raise FileExistsError(f"directory is not empty: {entry.path}")
         self._api.post(
             Endpoint.WEBAPI + "/rb/delete",
-            data={f"fid[{i}]": id_ for i, id_ in enumerate(ids)},
+            data={f"fid[{i}]": entry.id for i, entry in enumerate(entries)},
         )
 
     def rename(self, path: str | FileSystemEntry, name: str) -> None:
@@ -329,10 +349,14 @@ class FileClient(BaseFileClient, BaseClient):
         pick_code = result_data.get("pick_code") or result_data.get("pickcode")
 
         def _decode_bytes(raw: bytes) -> str:
-            for enc in ["utf-16", "utf-16-le", "utf-8", "gb18030", "gbk"]:
+            if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+                return raw.decode("utf-16")
+            # Preserve BOM-less UTF-16-LE exports, whose tree markers contain NULs.
+            encodings = ("utf-16-le",) if b"\x00" in raw else ("utf-8-sig", "gb18030")
+            for enc in encodings:
                 try:
                     return raw.decode(enc)
-                except Exception:
+                except UnicodeDecodeError:
                     continue
             return raw.decode("utf-8", errors="replace")
 
@@ -443,9 +467,6 @@ class FileClient(BaseFileClient, BaseClient):
                     sha1=sha1,
                     dir_id=dir_id,
                 )
-                status.is_instant_uploaded = True
-                logger.info(f"[{path}] Instant upload (秒传) succeeded!")
-                return self.stat(path)
             except Exception as exc:
                 status.instant_upload_error = exc
                 logger.debug(f"[{path}] Instant upload unavailable ({exc}), proceeding to physical upload")
@@ -453,6 +474,10 @@ class FileClient(BaseFileClient, BaseClient):
                     raise
                 if isinstance(exc, InstantUploadNotAvailableError):
                     init_data = exc.response_data
+            else:
+                status.is_instant_uploaded = True
+                logger.info(f"[{path}] Instant upload (秒传) succeeded!")
+                return self.stat(path)
             file.seek(0)
 
         if isinstance(file, RemoteFile):
@@ -500,10 +525,13 @@ class FileClient(BaseFileClient, BaseClient):
             entry_name = path.name
             entry_size = path.size
             entry_sha1 = path.sha1
-        elif isinstance(path, str) and len(path) == 17 and "/" not in path and "\\" not in path:
+        elif (
+            isinstance(path, str) and len(path) == 17
+            and "/" not in path and "\\" not in path
+        ):
             pickcode = path
             entry_name = ""
-            entry_size = 0
+            entry_size = None
             entry_sha1 = ""
         else:
             entry = self._resolve_entry(path)
@@ -523,8 +551,35 @@ class FileClient(BaseFileClient, BaseClient):
         download_url = ""
         for item in raw_data.values():
             if isinstance(item, dict) and item.get("pick_code") == pickcode:
-                download_url = item["url"]["url"]
+                url_data = item.get("url")
+                download_url = (
+                    url_data.get("url") if isinstance(url_data, dict) else url_data
+                )
+                if entry_size is None:
+                    entry_name = item.get("file_name")
+                    raw_size = item.get("file_size")
+                    if not isinstance(entry_name, str) or not entry_name:
+                        raise OSError("download response is missing the file name")
+                    if (
+                        not isinstance(raw_size, (int, str))
+                        or isinstance(raw_size, bool)
+                    ):
+                        raise OSError("download response has no valid file size")
+                    try:
+                        entry_size = int(raw_size)
+                    except ValueError as exc:
+                        raise OSError(
+                            "download response has no valid file size"
+                        ) from exc
+                    if entry_size < 0:
+                        raise OSError("download response has no valid file size")
+                    entry_sha1 = item.get("sha1") or ""
                 break
+
+        if not isinstance(download_url, str) or not download_url.startswith(
+            ("http://", "https://")
+        ):
+            raise OSError("download response contains no matching download URL")
 
         cookie_str = resp.request.headers["Cookie"]
         return DownloadUrl(

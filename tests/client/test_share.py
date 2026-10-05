@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from urllib.parse import parse_qs
 
 from httpx import MockTransport, Request, Response
+import pytest
 
 from cli115.client import create_client
 from cli115.client.models import Directory, ShareDirectory, ShareFile
@@ -230,6 +231,105 @@ class TestShareClient:
         assert isinstance(entries[0], ShareFile)
         assert entries[0].name == "guide.txt"
         assert entries[0].path == "/docs/guide.txt"
+
+    @pytest.mark.parametrize("resolved", [False, True])
+    def test_list_resolves_directory_once(self, resolved):
+        requests = []
+
+        def handler(request: Request) -> Response:
+            assert request.url.path == "/share/snap"
+            params = dict(request.url.params)
+            requests.append(params)
+            cid = params["cid"]
+            offset, limit = int(params["offset"]), int(params["limit"])
+            if cid == "0":
+                items = [_share_dir_item("100", name="docs")]
+                count = 1
+            elif cid == "100":
+                items = [_share_dir_item("110", pid="100", name="sub")]
+                count = 1
+            else:
+                assert cid == "110"
+                items = [
+                    _share_file_item(str(i), cid=cid, name=f"file-{i}.txt")
+                    for i in range(offset, min(offset + limit, 201))
+                ]
+                count = 201
+            return Response(
+                200,
+                json=_make_list_response(
+                    items, count=count, offset=offset, limit=limit
+                ),
+            )
+
+        client = self._make_client(handler)
+        try:
+            path = "/docs/sub"
+            if resolved:
+                path = client.share.stat("share-code", path, password="azhy")
+                requests.clear()
+            entries = client.share.list("share-code", password="azhy", path=path)
+            assert requests == []
+            assert [entry.path for entry in entries] == [
+                f"/docs/sub/file-{i}.txt" for i in range(201)
+            ]
+            assert [req["cid"] for req in requests] == (
+                [] if resolved else ["0", "100"]
+            ) + ["110"] * 3
+            assert [req["offset"] for req in requests if req["cid"] == "110"] == [
+                "0", "100", "200"
+            ]
+            assert all(req["share_code"] == "share-code" for req in requests)
+            assert all(req["receive_code"] == "azhy" for req in requests)
+
+            requests.clear()
+            assert len(client.share.list("share-code", path="/docs/sub")) == 201
+            assert [req["cid"] for req in requests] == ["0", "100", "110"]
+        finally:
+            client.share._api.close()
+
+    @pytest.mark.parametrize("path", ["", "/"])
+    def test_list_root_aliases(self, path):
+        requests = []
+
+        def handler(request: Request) -> Response:
+            requests.append(request)
+            assert request.url.params["cid"] == "0"
+            return Response(200, json=_make_list_response([], count=0, limit=100))
+
+        client = self._make_client(handler)
+        try:
+            entries = client.share.list("share-code", path=path)
+            assert requests == []
+            assert list(entries) == []
+            assert len(requests) == 1
+        finally:
+            client.share._api.close()
+
+    @pytest.mark.parametrize(
+        ("path", "error"),
+        [("/file.txt", NotADirectoryError), ("/missing", FileNotFoundError)],
+    )
+    def test_list_invalid_directory(self, path, error):
+        requests = []
+
+        def handler(request: Request) -> Response:
+            requests.append(request)
+            assert request.url.params["cid"] == "0"
+            return Response(
+                200,
+                json=_make_list_response([_share_file_item("200")], count=1),
+            )
+
+        client = self._make_client(handler)
+        try:
+            entries = client.share.list("share-code", path=path)
+            assert requests == []
+            with pytest.raises(error):
+                len(entries)
+            assert len(requests) == 1
+        finally:
+            client.share._api.close()
 
     def test_stat_nested_file(self):
         requests: list[dict[str, str]] = []

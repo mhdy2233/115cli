@@ -1,9 +1,9 @@
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.client.conftest import make_client, make_dir, upload_file
+from tests.client.conftest import make_client, make_dir, make_file, upload_file
 
 
 class TestCreateDirectory:
@@ -49,41 +49,43 @@ class TestCreateDirectory:
 
     def test_create_existing_directory_succeeds_with_parents(self):
         # When parents=True, an already-existing target directory is returned
-        # via stat rather than raising FileExistsError.
+        # after resolving its ID rather than raising FileExistsError.
         client = make_client()
-        existing = make_dir(name="existing", id="999", path="/parent/existing")
 
         def mock_request(url, **kwargs):
             resp = MagicMock()
             if url.endswith("/files/getid"):
-                resp.json.return_value = {"id": "123"}
+                resp.json.return_value = {
+                    "id": "999" if kwargs["params"]["path"] == "/parent/existing" else "123"
+                }
             if url.endswith("/files/add"):
                 raise FileExistsError("directory already exists")
             return resp
 
         client.file._api.get.side_effect = mock_request
         client.file._api.post.side_effect = mock_request
-        client.file.stat = MagicMock(return_value=existing)
         result = client.file.create_directory("/parent/existing", parents=True)
-        assert result is existing
+        assert result.id == "999"
+        assert result.parent_id == "123"
+        assert result.path == "/parent/existing"
 
     def test_create_existing_file_with_parents_raises(self):
-        # When parents=True and the target path exists as a file, it should raise FileExistsError.
+        # A conflict must not be returned as a Directory if getid cannot resolve it.
         client = make_client()
-        existing_file = make_file(name="existing", id="999", path="/parent/existing")
 
         def mock_request(url, **kwargs):
             resp = MagicMock()
             if url.endswith("/files/getid"):
-                resp.json.return_value = {"id": "123"}
+                resp.json.return_value = {
+                    "id": "0" if kwargs["params"]["path"] == "/parent/existing" else "123"
+                }
             if url.endswith("/files/add"):
                 raise FileExistsError("directory already exists")
             return resp
 
         client.file._api.get.side_effect = mock_request
         client.file._api.post.side_effect = mock_request
-        client.file.stat = MagicMock(return_value=existing_file)
-        with pytest.raises(FileExistsError, match="cannot create directory at file path"):
+        with pytest.raises(FileNotFoundError, match="directory not found"):
             client.file.create_directory("/parent/existing", parents=True)
 
 class TestDelete:
@@ -142,6 +144,43 @@ class TestDelete:
         client.file.stat = MagicMock(side_effect=FileNotFoundError("not found"))
         with pytest.raises(FileNotFoundError):
             client.file.delete("/nonexistent")
+
+    @pytest.mark.parametrize("batch", [False, True])
+    def test_nonrecursive_delete_checks_before_mutating(self, batch):
+        client = make_client()
+        directory, file = make_dir(), make_file()
+        client.file.list = MagicMock(return_value=[file])
+
+        with pytest.raises(FileExistsError, match="directory is not empty"):
+            if batch:
+                client.file.batch_delete(file, directory)
+            else:
+                client.file.delete(directory)
+
+        client.file._api.post.assert_not_called()
+
+    def test_recursive_batch_delete(self):
+        client = make_client()
+        directory, file = make_dir(), make_file()
+        client.file.list = MagicMock()
+        client.file.batch_delete(directory, file, recursive=True)
+        client.file.list.assert_not_called()
+        assert client.file._api.post.call_args.kwargs["data"] == {
+            "fid[0]": directory.id, "fid[1]": file.id
+        }
+
+    def test_batch_delete_missing_path_does_not_mutate(self):
+        client = make_client()
+        client.file.stat = MagicMock(side_effect=[make_file(), FileNotFoundError()])
+        with pytest.raises(FileNotFoundError):
+            client.file.batch_delete("/file.txt", "/missing", recursive=True)
+        client.file._api.post.assert_not_called()
+
+    def test_batch_delete_empty_rejected(self):
+        client = make_client()
+        with pytest.raises(ValueError, match="no paths"):
+            client.file.batch_delete()
+        client.file._api.post.assert_not_called()
 
 
 class TestMove:
@@ -269,9 +308,11 @@ class TestRename:
         assert result.name == new_name
 
 class TestExportDir:
-    def test_export_dir_success(self):
+    @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "gb18030"])
+    def test_export_dir_success(self, encoding):
         client = make_client()
         target_dir = make_dir(id="12345", name="myfolder", path="/myfolder")
+        content = "root\n|-文件.txt\n"
 
         def mock_request(url, **kwargs):
             resp = MagicMock()
@@ -285,10 +326,17 @@ class TestExportDir:
                         "download_url": "https://example.com/tree.txt",
                     },
                 }
+            elif url == "https://example.com/tree.txt":
+                resp.status_code = 200
+                resp.content = content.encode(encoding)
+            else:
+                raise AssertionError(f"unexpected request: {url}")
             return resp
 
         client.file._api.post.side_effect = mock_request
         client.file._api.get.side_effect = mock_request
-        res = client.file.export_dir(target_dir, timeout=5.0)
+        with patch("cli115.client.general.file.time.sleep"):
+            res = client.file.export_dir(target_dir, timeout=5.0)
         assert res["file_name"] == "myfolder_目录树.txt"
         assert res["download_url"] == "https://example.com/tree.txt"
+        assert res["content"] == content

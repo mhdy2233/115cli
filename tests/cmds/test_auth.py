@@ -9,7 +9,7 @@ from cli115.auth.cookie import CookieAuth
 from cli115.cli import build_parser
 from cli115.client.models import AccountInfo
 from cli115.credentials import CredentialManager, CredType, CURRENT_CREDENTIAL_FILE
-from cli115.exceptions import CredentialError
+from cli115.exceptions import CommandLineError, CredentialError
 
 
 COOKIE_STRING = "UID=user1; CID=cid1; SEID=seid1; KID=kid1"
@@ -38,6 +38,17 @@ def _setup_cm(tmp_path):
 
 
 class TestAuthCookieCommand:
+    @patch("cli115.cmds.auth.create_client")
+    def test_empty_cookie_rejected_before_request(self, mock_create_client, tmp_path):
+        cm, cfg = _setup_cm(tmp_path)
+        parser, commands = build_parser(config=cfg, credential_manager=cm)
+        args = parser.parse_args(["auth", "cookie", "UID=user1; CID=; SEID=s; KID=k"])
+
+        with pytest.raises(CommandLineError, match="CID"):
+            commands["auth"].execute(args)
+
+        mock_create_client.assert_not_called()
+
     @patch("cli115.cmds.auth.create_client")
     def test_cookie_string_stores_credentials(
         self, mock_create_client, tmp_path, capsys
@@ -239,6 +250,26 @@ class TestLoginSwitchCommand:
 
 
 class TestLogoutCommand:
+    def test_remove_named_user_without_active_session(self, tmp_path):
+        cm, config = _setup_cm(tmp_path)
+        cm.save_credential("user1", CredType.COOKIE, COOKIE_VALUES)
+        parser, commands = build_parser(config=config, credential_manager=cm)
+
+        commands["logout"].execute(parser.parse_args(["logout", "user1"]))
+
+        assert not (tmp_path / "user1.json").exists()
+
+    def test_remove_all_active_credentials_clears_session(self, tmp_path):
+        cm, config = _setup_cm(tmp_path)
+        cm.save_credential("user1", CredType.COOKIE, COOKIE_VALUES)
+        cm.login("user1")
+        parser, commands = build_parser(config=config, credential_manager=cm)
+
+        commands["logout"].execute(parser.parse_args(["logout", "user1"]))
+
+        assert not (tmp_path / "user1.json").exists()
+        assert not (tmp_path / CURRENT_CREDENTIAL_FILE).exists()
+
     def test_logout_current_user_clears_session(self, tmp_path, capsys):
         cm, config = _setup_cm(tmp_path)
         cm.save_credential("testuser", CredType.COOKIE, COOKIE_VALUES)

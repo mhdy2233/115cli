@@ -163,7 +163,7 @@ class ShareSaveCommand(BaseShareCommand):
                 client.share.list(
                     share_code,
                     password=password,
-                    path=base_entry.path or args.path,
+                    path=base_entry,
                 )
             )
         else:

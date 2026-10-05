@@ -6,7 +6,7 @@ import argparse
 
 from cli115.cmds.base import BaseCommand
 from cli115.credentials import CredType
-from cli115.exceptions import CommandLineError
+from cli115.exceptions import CommandLineError, CredentialError
 
 
 class LogoutCommand(BaseCommand):
@@ -29,15 +29,16 @@ class LogoutCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
+        current_uid = current_cred_type = None
         try:
             current_uid = self.cm.current_user
             current_cred_type, _ = self.cm.current_credential
-        except FileNotFoundError:
-            current_uid = None
+        except CredentialError:
+            pass
 
         if not args.username and not current_uid:
             raise CommandLineError(
-                "Error: No active user to log out. Use '115cli login' to log in."
+                "no active user to log out, use '115cli login' to log in"
             )
 
         username = args.username or current_uid
@@ -49,7 +50,9 @@ class LogoutCommand(BaseCommand):
 
         self.cm.clear_credential(username, cred_type)
 
-        if username == current_uid and cred_type == current_cred_type:
+        if username == current_uid and (
+            cred_type is None or cred_type == current_cred_type
+        ):
             # log out current user only when the active credential type is being removed
             self.cm.logout()
             print(f"Logged out {current_uid}.")

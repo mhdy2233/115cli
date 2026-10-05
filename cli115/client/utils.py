@@ -12,7 +12,7 @@ def parse_ts(value) -> datetime | None:
         return None
     try:
         return datetime.fromtimestamp(int(value))
-    except (ValueError, TypeError, OSError):
+    except (ValueError, TypeError, OSError, OverflowError):
         pass
     if isinstance(value, str):
         for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
@@ -53,7 +53,7 @@ def parse_item(item: dict, share: bool = False) -> Directory | File:
                 "size": int(item.get("s", 0)),
                 "sha1": item.get("sha", ""),
                 "file_type": item.get("ico", ""),
-                "starred": bool(item.get("sta")),
+                "starred": item.get("sta") in (1, "1"),
             }
         )
         klass = ShareFile if share else File

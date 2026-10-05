@@ -14,7 +14,7 @@ from cli115.auth import CookieAuth
 from cli115.client import Client, create_client, Directory, File, general
 from cli115.helpers import normalize_path, parse_cookie_string
 
-TEST_ROOT = "/115cli_test"
+TEST_ROOT = f"/115cli_test_{uuid.uuid4().hex[:12]}"
 
 
 def make_client():
@@ -278,10 +278,7 @@ def api_client():
 
 @pytest.fixture(scope="session")
 def root_dir(api_client):
-    try:
-        root = api_client.file.create_directory(TEST_ROOT)
-    except FileExistsError:
-        root = api_client.file.stat(TEST_ROOT)
+    root = api_client.file.create_directory(TEST_ROOT)
 
     api_client.register_entry(root)
 

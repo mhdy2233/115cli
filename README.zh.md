@@ -57,6 +57,10 @@ pip install 115cli
 115cli fetch --id 1234567 -o /local/save/path.mp4
 # 递归下载文件夹, 并进行完整性校验
 115cli fetch /path/to/dir/ -o /local/save/dir/ --check-integrity
+# 同时下载最多 4 个文件
+115cli fetch /path/to/dir/ -o /local/save/dir/ -j 4 --check-integrity
+# 本地同路径文件已存在就跳过（不比较大小和内容）
+115cli fetch /path/to/dir/ -o /local/save/dir/ -T -j 4 --dedup-by-name
 # 下载文件黑白名单
 115cli fetch /path/to/dir/ -o /local/save/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
 
@@ -70,6 +74,8 @@ pip install 115cli
 115cli upload /local/folder/ /remote/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
 # 多文件并发上传与自定义分片大小
 115cli upload /local/folder/ /remote/dir/ -j 4 --part-size 32M
+# 获取一次远端目录树，仅按目标相对路径同名去重（忽略大小和内容差异）
+115cli upload /local/folder/ /remote/dir/ -T -j 4 --dedup-by-name
 # 开启 Debug 模式打印详细上传/秒传/OSS链路日志
 115cli upload /local/folder/ /remote/dir/ --debug
 
@@ -102,6 +108,27 @@ pip install 115cli
 ```
 
 > 注意: 某些创建云下载任务的操作可能会触发图形验证码, 目前客户端不支持处理验证码.
+
+上传和下载的 `-j N` 控制同时传输的文件数，默认均为 1；可在配置中设置
+`upload.max_workers` 和 `download.max_workers`。默认同一路径只有大小和 SHA-1
+都一致才跳过；上传遇到同名不同内容、文件与目录冲突会报错。
+下载会跳过已校验相同的本地文件，不同内容仍在下载成功后替换。
+进度和成功、跳过、失败统计输出到 stderr，终端显示总览及活跃文件进度；
+重定向时只保留摘要。`--silent` 关闭进度与摘要，上传 `--format json` 的 stdout 保持纯 JSON。
+
+`upload --dedup-by-name` 对目录只获取一次服务端导出树，在内存中按完整相对路径
+跳过同名项，不再逐子目录查询元信息，也不比较大小或 SHA-1；不同子目录的同名文件
+不会混淆。只有待上传文件所需的父目录才按需解析或创建。导出包含提交、轮询及下载文本，
+因此不是零 API 请求，小目录也不一定更省请求；服务端还会在目标目录生成导出文本文件。
+该模式不会识别同名文件的内容变化，导出文本也不能可靠区分叶节点文件和空目录。
+默认的大小/SHA-1 模式保留文件类型和内容检查。
+
+`fetch --dedup-by-name` 同样可用：本地目标文件已存在就跳过，不读取大小或计算 SHA-1；
+远端文件信息和目录列表查询仍然需要。`--check-integrity` 只校验新下载文件，不校验已跳过文件。
+
+完整目录扫描（默认上传去重、递归下载和本地目录树导出）每页最多请求 1150 项，
+普通 `ls` 的取页容量仍为 200；服务端若返回更小容量，后续分页采用返回值。
+搜索和分享分页在一次操作内复用目录 ID，单文件上传复用目标预检和父目录 ID，避免重复查询。
 
 ### 认证(Cookie)
 

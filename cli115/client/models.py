@@ -413,12 +413,9 @@ class UploadStatus:
     def start_upload(self, file_size: int):
         progress = Progress(file_size)
         self.on_upload.send(self, progress=progress)
-        progress.on_change.connect(
-            lambda sender, completed, **_: completed and self._complete(),
-            weak=False,
-        )
         self.set_message("uploading...")
         yield progress
+        self._complete()
 
     @property
     def is_completed(self) -> bool:

@@ -27,6 +27,25 @@ class TestDownloadQuota:
 
 class TestDownloadAddAndDelete:
 
+    def test_add_urls_returns_tasks_beyond_first_page(self):
+        client = make_client()
+        hashes = [f"hash{i}" for i in range(31)]
+        client.download._api.post_encrypted.return_value.json.return_value = {
+            "result": [{"info_hash": value} for value in hashes]
+        }
+        client.download._api.get.return_value.json.side_effect = [
+            {"tasks": [{"info_hash": value} for value in hashes[:30]],
+             "count": 60, "page": 1, "page_row": 30},
+            {"tasks": [{"info_hash": value} for value in hashes[30:]],
+             "count": 60, "page": 2, "page_row": 30},
+        ]
+
+        urls = [f"https://example.com/{i}" for i in range(31)]
+        tasks = client.download.add_urls(*urls)
+
+        assert [task.info_hash for task in tasks] == hashes
+        assert client.download._api.get.call_count == 2
+
     def test_add_urls(self, api_client):
         hashes = []
         try:

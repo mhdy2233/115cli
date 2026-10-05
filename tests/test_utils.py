@@ -37,6 +37,7 @@ class TestParseTs:
 
     def test_returns_none_for_invalid_string(self):
         assert parse_ts("not-a-date") is None
+        assert parse_ts(10**100) is None
 
 
 class TestParseLabels:
@@ -114,6 +115,8 @@ class TestParseItem:
     def test_file_starred(self):
         item = parse_item(self._file_raw(sta=1))
         assert item.starred
+        assert parse_item(self._file_raw(sta="1")).starred
+        assert not parse_item(self._file_raw(sta="0")).starred
 
     def test_file_labels(self):
         item = parse_item(self._file_raw(fl=[{"name": "fav"}]))
