@@ -1,20 +1,28 @@
 # 115cli
 
-[![PyPI version](https://img.shields.io/pypi/v/115cli.svg)](https://pypi.org/project/115cli/)
-[![test](https://github.com/Xavier-Lam/115cli/actions/workflows/test.yml/badge.svg)](https://github.com/Xavier-Lam/115cli/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/Xavier-Lam/115cli/branch/master/graph/badge.svg)](https://codecov.io/gh/Xavier-Lam/115cli)
+[![test](https://github.com/mhdy2233/115cli/actions/workflows/test.yml/badge.svg)](https://github.com/mhdy2233/115cli/actions/workflows/test.yml)
 
 **115cli** 是一个非官方的 [115.com](https://115.com) 网盘命令行工具和 *Python* 库, 提供常用的文件操作命令行接口, 同时提供一个高级API封装供 *Python* 项目使用.
+
+本仓库 [mhdy2233/115cli](https://github.com/mhdy2233/115cli) fork 自
+[Xavier-Lam/115cli](https://github.com/Xavier-Lam/115cli)。PyPI 上的 `115cli`
+由上游发布，并非本 fork 发布；直接执行 `pip install 115cli` 不会安装本 fork 的修改，
+请从本仓库源码安装。
 
 在使用本项目前, 请仔细阅读[免责声明](#免责声明).
 
 ## 安装
 
-推荐使用 pip 安装:
+需要 Python 3.12 或更高版本及 Git。克隆本 fork 后从源码安装：
 
 ```bash
-pip install 115cli
+git clone https://github.com/mhdy2233/115cli.git
+cd 115cli
+python -m pip install -e .
 ```
+
+如果已经克隆本仓库，在仓库根目录执行 `python -m pip install -e .` 即可。
+安装后的命令仍为 `115cli`。
 
 ## 快速上手(CLI)
 

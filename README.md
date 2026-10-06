@@ -1,10 +1,13 @@
 # 115cli
 
-[![PyPI version](https://img.shields.io/pypi/v/115cli.svg)](https://pypi.org/project/115cli/)
-[![test](https://github.com/Xavier-Lam/115cli/actions/workflows/test.yml/badge.svg)](https://github.com/Xavier-Lam/115cli/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/Xavier-Lam/115cli/branch/master/graph/badge.svg)](https://codecov.io/gh/Xavier-Lam/115cli)
+[![test](https://github.com/mhdy2233/115cli/actions/workflows/test.yml/badge.svg)](https://github.com/mhdy2233/115cli/actions/workflows/test.yml)
 
 An unofficial CLI tool and *Python* library for [115.com](https://115.com) cloud storage. It provides a command-line interface for common file operations and a higher-level *Python* API client that can be used as a library in your own code.
+
+This repository is [mhdy2233/115cli](https://github.com/mhdy2233/115cli), a fork of
+[Xavier-Lam/115cli](https://github.com/Xavier-Lam/115cli). The `115cli` package on
+PyPI is published by upstream, not by this fork. Running `pip install 115cli`
+does not install this fork's changes; install from this repository instead.
 
 Read [disclaimer](#disclaimer) carefully before using this tool.
 
@@ -12,9 +15,16 @@ Read [disclaimer](#disclaimer) carefully before using this tool.
 
 ## Installation
 
+Requires Python 3.12 or later and Git. Clone this fork and install its source:
+
 ```bash
-pip install 115cli
+git clone https://github.com/mhdy2233/115cli.git
+cd 115cli
+python -m pip install -e .
 ```
+
+If you already have this repository checked out, run `python -m pip install -e .`
+from its root directory. The command remains `115cli`.
 
 ## Usage
 
