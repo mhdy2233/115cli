@@ -62,7 +62,13 @@ class APIClient(httpx.Client):
         return resp
 
     def send(self, request: httpx.Request, *args, **kwargs):
-        response = super().send(request, *args, **kwargs)
+        for attempt in range(3):
+            try:
+                response = super().send(request, *args, **kwargs)
+                break
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if attempt == 2:
+                    raise
 
         self._check_response(response)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 from httpx import BaseTransport
 
 from cli115.auth import Auth
@@ -26,6 +27,7 @@ class Client(BaseClient):
 
     def __init__(self, auth: Auth, transport: BaseTransport | None = None):
         api = APIClient(
+            timeout=httpx.Timeout(60.0, connect=30.0),
             cookies=auth.get_cookies(),
             headers={
                 "User-Agent": DEFAULT_USER_AGENT,

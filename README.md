@@ -83,6 +83,7 @@ After [authenticating](#authentication) with `115cli login`, you can use the `11
 # Upload with include/exclude patterns
 115cli upload /local/folder/ /remote/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
 # Upload multiple files concurrently with custom part size
+# Each upload buffers one part; memory use grows with concurrency and part size
 115cli upload /local/folder/ /remote/dir/ -j 4 --part-size 32M
 # Use one exported remote tree to skip matching relative paths by name only
 115cli upload /local/folder/ /remote/dir/ -T -j 4 --dedup-by-name

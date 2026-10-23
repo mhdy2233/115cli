@@ -27,7 +27,9 @@ setup(
     packages=find_packages(include=["cli115*"]),
     python_requires=">=3.12",
     install_requires=[
-        "p115cipher==0.0.4",
+        "p115cipher==0.0.6",
+        "lz4",
+        "pycryptodome",
         "blinker",
         "httpx",
         "bottle",

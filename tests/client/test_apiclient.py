@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import httpx
 from httpx import MockTransport, Response
 import pytest
 
@@ -81,3 +82,52 @@ class TestCheckResponse:
         with pytest.raises(APIError) as exc_info:
             APIClient()._check_response(resp)
         assert "Unknown API error" in str(exc_info.value)
+
+
+class TestConnectionRetries:
+
+    @pytest.mark.parametrize("error_cls", [httpx.ConnectError, httpx.ConnectTimeout])
+    def test_connection_failure_retries_with_same_payload(self, error_cls):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            if len(requests) < 3:
+                raise error_cls("connection failed", request=request)
+            return Response(200, json={"state": True})
+
+        with APIClient(transport=MockTransport(respond)) as client:
+            response = client.post("https://example.com/api", content=b"payload")
+
+        assert response.json() == {"state": True}
+        assert len(requests) == 3
+        assert all(request.content == b"payload" for request in requests)
+
+    @pytest.mark.parametrize("error_cls", [httpx.ConnectError, httpx.ConnectTimeout])
+    def test_connection_retry_limit_preserves_last_error(self, error_cls):
+        errors = []
+
+        def respond(request):
+            error = error_cls("connection failed", request=request)
+            errors.append(error)
+            raise error
+
+        with APIClient(transport=MockTransport(respond)) as client:
+            with pytest.raises(error_cls) as exc_info:
+                client.get("https://example.com/api")
+
+        assert len(errors) == 3
+        assert exc_info.value is errors[-1]
+
+    def test_read_timeout_is_not_retried(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            raise httpx.ReadTimeout("response stalled", request=request)
+
+        with APIClient(transport=MockTransport(respond)) as client:
+            with pytest.raises(httpx.ReadTimeout, match="response stalled"):
+                client.post("https://example.com/api", content=b"payload")
+
+        assert len(requests) == 1

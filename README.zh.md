@@ -81,6 +81,7 @@ python -m pip install -e .
 # 文件黑白名单
 115cli upload /local/folder/ /remote/dir/ --include "**/*.mkv" --include "**/*.mp4" --exclude "secret/*"
 # 多文件并发上传与自定义分片大小
+# 每个上传任务暂存一块分片，内存占用随并发数与分片大小增加
 115cli upload /local/folder/ /remote/dir/ -j 4 --part-size 32M
 # 获取一次远端目录树，仅按目标相对路径同名去重（忽略大小和内容差异）
 115cli upload /local/folder/ /remote/dir/ -T -j 4 --dedup-by-name
