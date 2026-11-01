@@ -83,6 +83,8 @@ def load_config() -> ConfigParser:
         config["general"]["credentials"] = str(DEFAULT_CREDENTIALS_DIR)
     if "user_agent" not in config["general"]:
         config["general"]["user_agent"] = DEFAULT_USER_AGENT
+    if "proxy" not in config["general"]:
+        config["general"]["proxy"] = ""
     if "download" not in config:
         config["download"] = {}
     if "min_split_size" not in config["download"]:
@@ -111,6 +113,12 @@ def build_parser(
     )
     parser.add_argument(
         "-V", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    parser.add_argument(
+        "--proxy",
+        metavar="URL",
+        default=None,
+        help="Proxy for all 115 traffic (http://, https://, socks5:// or socks5h://)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -151,6 +159,9 @@ def main(argv: list[str] | None = None) -> None:
     if unknown:
         leaf = _find_leaf_parser(parser, args)
         leaf.error(f"unrecognized arguments: {' '.join(unknown)}")
+
+    if getattr(args, "proxy", None):
+        config["general"]["proxy"] = args.proxy
 
     cmd = commands.get(args.command)
     if cmd is None:

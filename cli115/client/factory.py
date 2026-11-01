@@ -7,7 +7,11 @@ from cli115.client.base import Client
 from cli115.client import general
 
 
-def create_client(auth: Auth, transport: BaseTransport | None = None) -> Client:
+def create_client(
+    auth: Auth,
+    transport: BaseTransport | None = None,
+    proxy: str | None = None,
+) -> Client:
     """Create a high-level Client from an Auth provider.
 
     The auth object is retained by the client so it can
@@ -15,8 +19,10 @@ def create_client(auth: Auth, transport: BaseTransport | None = None) -> Client:
 
     Args:
         auth: An authentication provider.
+        transport: Optional custom transport (takes precedence over proxy).
+        proxy: Optional proxy URL for all 115 traffic.
 
     Returns:
         A Client instance.
     """
-    return general.Client(auth, transport=transport)
+    return general.Client(auth, transport=transport, proxy=proxy)

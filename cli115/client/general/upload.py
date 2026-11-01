@@ -58,14 +58,16 @@ class UploadClient:
       - ``multipart_upload``: OSS multipart upload for large files.
     """
 
-    def __init__(self, api: APIClient):
+    def __init__(self, api: APIClient, proxy: str | None = None):
         self._api = api
+        self._proxy = proxy
         self._client = httpx.Client(
             timeout=httpx.Timeout(120.0, connect=30.0),
             headers={
                 "User-Agent": api.headers.get("User-Agent", DEFAULT_USER_AGENT),
                 "Referer": "https://115.com/",
-            }
+            },
+            proxy=proxy,
         )
 
     def instant_upload(
@@ -164,7 +166,7 @@ class UploadClient:
             file=file,
         )
 
-        with httpcore.ConnectionPool(retries=2) as pool:
+        with self._make_pool() as pool:
             response = pool.handle_request(request)
             try:
                 body = response.read()
@@ -247,7 +249,7 @@ class UploadClient:
 
         parts: list[dict] = []
         part_number = 1
-        with httpcore.ConnectionPool(retries=2) as pool:
+        with self._make_pool() as pool:
             while True:
                 # Buffer one part so its length is known and retries replay it exactly.
                 chunk = file.read(part_size)
@@ -304,6 +306,11 @@ class UploadClient:
     def _get_oss_token(self) -> dict:
         """Fetch a short-lived STS token from 115 for signing OSS requests."""
         return self._api.get(Endpoint.UPLB + "/3.0/gettoken.php").json()
+
+    def _make_pool(self) -> httpcore.ConnectionPool:
+        """Connection pool for raw OSS byte transfers; honors the proxy."""
+        proxy = httpcore.Proxy(self._proxy) if self._proxy else None
+        return httpcore.ConnectionPool(retries=2, proxy=proxy)
 
     def _oss_multipart_upload_init(self, url: str, token: dict) -> str:
         """Initiate an OSS multipart upload session and return the upload_id."""

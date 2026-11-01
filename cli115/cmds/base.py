@@ -53,7 +53,12 @@ class BaseCommand(ABC):
                 seid=cred["SEID"],
                 kid=cred["KID"],
             )
-            return create_client(auth)
+            proxy = (
+                (self.cfg.get("general", "proxy", fallback="") or "").strip()
+                if self.cfg
+                else None
+            )
+            return create_client(auth, proxy=proxy or None)
         else:
             raise CommandLineError(f"unsupported credential type: {cred_type}")
 

@@ -32,6 +32,7 @@ setup(
         "pycryptodome",
         "blinker",
         "httpx",
+        "socksio",
         "bottle",
         "m3u8",
         "pathspec",

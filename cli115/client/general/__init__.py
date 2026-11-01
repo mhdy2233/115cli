@@ -25,7 +25,12 @@ class Client(BaseClient):
     interface.
     """
 
-    def __init__(self, auth: Auth, transport: BaseTransport | None = None):
+    def __init__(
+        self,
+        auth: Auth,
+        transport: BaseTransport | None = None,
+        proxy: str | None = None,
+    ):
         api = APIClient(
             timeout=httpx.Timeout(60.0, connect=30.0),
             cookies=auth.get_cookies(),
@@ -35,10 +40,11 @@ class Client(BaseClient):
                 "Origin": "https://115.com",
             },
             transport=transport,
+            proxy=None if transport is not None else proxy,
         )
         super().__init__(
             account=AccountClient(api),
-            file=FileClient(api),
+            file=FileClient(api, proxy=proxy),
             download=DownloadClient(api),
             share=ShareClient(api),
             stream=StreamClient(api),

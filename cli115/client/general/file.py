@@ -37,10 +37,10 @@ logger = logging.getLogger("115cli.file")
 
 class FileClient(BaseFileClient, BaseClient):
 
-    def __init__(self, api):
+    def __init__(self, api, proxy: str | None = None):
         super().__init__(api)
-        self._uploader = UploadClient(api)
-
+        self._proxy = proxy
+        self._uploader = UploadClient(api, proxy=proxy)
     # -- public API --
 
     def id(self, file_id: str) -> Directory | File:

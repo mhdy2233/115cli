@@ -69,7 +69,12 @@ class AuthCookieCommand(BaseCommand):
             seid=cookies["SEID"],
             kid=cookies["KID"],
         )
-        client = create_client(auth)
+        proxy = (
+            (self.cfg.get("general", "proxy", fallback="") or "").strip()
+            if self.cfg
+            else None
+        )
+        client = create_client(auth, proxy=proxy or None)
         account = client.account.info()
         self.cm.save_credential(account.user_name, CredType.COOKIE, cookies)
         return account

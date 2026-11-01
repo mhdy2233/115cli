@@ -147,6 +147,25 @@ python -m pip install -e .
 115cli login cookie "UID=xxx; CID=xxx; SEID=xxx; KID=xxx"
 ```
 
+## 配置
+
+可在 `~/.115cli/config.ini` 的 `[general]` 段中配置代理：
+
+```ini
+[general]
+proxy = http://127.0.0.1:7890
+```
+
+支持 `http://`、`https://`、`socks5://` 以及 `socks5h://` 协议，支持 `user:pass@host` 认证；留空则直连。
+
+如需单次覆盖代理，可在子命令前使用 `--proxy` 参数：
+
+```bash
+115cli --proxy socks5://127.0.0.1:1080 ls /
+```
+
+代理将覆盖包括 API 请求、文件上传（含 OSS 分片上传）及下载在内的全部流量。
+
 ## Client API
 
 本项目提供一个高级的 *Python* API 客户端,你可以在自己的项目中直接使用:
@@ -161,8 +180,8 @@ auth = CookieAuth(
 	seid="xxx",
 	kid="xxx"
 )
-client = create_client(auth)
-
+# 可选：传入 proxy="socks5://127.0.0.1:1080" 使全部流量走代理
+client = create_client(auth, proxy="socks5://127.0.0.1:1080")
 # 列目录
 entries = client.file.list("/")
 for entry in entries:

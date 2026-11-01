@@ -158,6 +158,25 @@ operation, and single-file uploads reuse their preflight check and parent ID.
 115cli login cookie "UID=xxx; CID=xxx; SEID=xxx; KID=xxx"
 ```
 
+### Configuration
+
+You can configure proxy settings in `~/.115cli/config.ini` under the `[general]` section:
+
+```ini
+[general]
+proxy = http://127.0.0.1:7890
+```
+
+Supported schemes are `http://`, `https://`, `socks5://`, and `socks5h://`, with optional `user:pass@host` authentication. Leave empty for direct connections.
+
+To override the proxy for a single command, pass `--proxy` before the subcommand:
+
+```bash
+115cli --proxy socks5://127.0.0.1:1080 ls /
+```
+
+The configured proxy covers all traffic including API requests, file uploads (including OSS multipart chunks), and downloads.
+
 ### Python API
 
 The package also exposes a higher-level Python API client that you can use in your own projects:
@@ -172,8 +191,8 @@ auth = CookieAuth(
     seid="xxx",
     kid="xxx"
 )
-client = create_client(auth)
-
+# Pass proxy="socks5://127.0.0.1:1080" to route all traffic through a proxy
+client = create_client(auth, proxy="socks5://127.0.0.1:1080")
 # List directory
 entries = client.file.list("/")
 for entry in entries:

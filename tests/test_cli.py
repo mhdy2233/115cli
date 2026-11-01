@@ -19,6 +19,7 @@ class TestLoadConfig:
 
         assert cfg["general"]["credentials"] == str(DEFAULT_CREDENTIALS_DIR)
         assert cfg["general"]["user_agent"] == DEFAULT_USER_AGENT
+        assert cfg["general"]["proxy"] == ""
         assert cfg["download"]["min_split_size"] == "2M"
         assert cfg["download"]["max_connection"] == "2"
         assert cfg["download"]["check_integrity"] == "false"
@@ -178,3 +179,41 @@ class TestPaginationCommand:
         args = parser.parse_args(["--limit", "5", "--offset", "10"])
         assert args.limit == 5
         assert args.offset == 10
+
+
+class TestProxyFlag:
+    @patch("cli115.cmds.base.create_client")
+    @patch(
+        "cli115.credentials.CredentialManager.current_credential",
+        new=("cookie", {"UID": "1", "CID": "2", "SEID": "3", "KID": "4"}),
+    )
+    def test_cli_flag_overrides_config(self, mock_create, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        cfg_file.write_text("[general]\nproxy = http://cfg-proxy:1\n")
+        mock_client = MagicMock()
+        mock_create.return_value = mock_client
+        main(["--proxy", "socks5://127.0.0.1:1080", "account"])
+        assert mock_create.call_args.kwargs["proxy"] == "socks5://127.0.0.1:1080"
+
+    @patch("cli115.cmds.base.create_client")
+    @patch(
+        "cli115.credentials.CredentialManager.current_credential",
+        new=("cookie", {"UID": "1", "CID": "2", "SEID": "3", "KID": "4"}),
+    )
+    def test_config_proxy_used(self, mock_create, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        cfg_file.write_text("[general]\nproxy = socks5://127.0.0.1:1080\n")
+        mock_client = MagicMock()
+        mock_create.return_value = mock_client
+        main(["account"])
+        assert mock_create.call_args.kwargs["proxy"] == "socks5://127.0.0.1:1080"
+
+    @patch("cli115.cmds.auth.create_client")
+    def test_login_cookie_uses_proxy(self, mock_create, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        cfg_file.write_text("[general]\nproxy = http://127.0.0.1:7890\n")
+        mock_client = MagicMock()
+        mock_client.account.info.return_value.user_name = "testuser"
+        mock_create.return_value = mock_client
+        main(["auth", "cookie", "UID=1; CID=2; SEID=3; KID=4"])
+        assert mock_create.call_args.kwargs["proxy"] == "http://127.0.0.1:7890"

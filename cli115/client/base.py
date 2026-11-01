@@ -184,6 +184,8 @@ class DownloadClient(ABC):
 class FileClient(ABC):
     """Abstract interface for file operations."""
 
+    _proxy: str | None = None
+
     @abstractmethod
     def id(self, file_id: str) -> Directory | File:
         """Get info for a file or directory by its ID.
@@ -637,7 +639,7 @@ class FileClient(ABC):
             IsADirectoryError: If ``path`` points to a directory.
         """
         info = self.url(path, user_agent=user_agent)
-        return RemoteFile(info)
+        return RemoteFile(info, proxy=self._proxy)
 
 
 class ShareClient(ABC):
@@ -825,8 +827,9 @@ class RemoteFile:
     a nonzero position uses a Range header.
     """
 
-    def __init__(self, info: DownloadUrl) -> None:
+    def __init__(self, info: DownloadUrl, proxy: str | None = None) -> None:
         self._info = info
+        self._proxy = proxy
         self._pos = 0
         self._size = info.file_size
         self._client = None
@@ -835,7 +838,6 @@ class RemoteFile:
         self._stream_resp = None
         self._stream_iter = None
         self._stream_buffer = bytearray()
-
     # -- helpers --
 
     def _ensure_client(self) -> httpx.Client:
@@ -847,6 +849,7 @@ class RemoteFile:
                     "Referer": self._info.referer,
                 },
                 follow_redirects=True,
+                proxy=self._proxy,
             )
         return self._client
 
